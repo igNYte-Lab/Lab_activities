@@ -1,0 +1,157 @@
+---
+title: "Average climate"
+output: html_document
+date: "2024-12-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(ncdf4) # package for netcdf manipulation
+# library(rgdal) # package for geospatial analysis
+library(ggplot2) # package for plotting
+# library(rstudioapi) # automatically get the directory
+library(stringr)
+library(terra) # package for raster manipulation
+library(sf)
+library(tmap)
+library(raster)
+```
+
+```{r}
+
+average_climate_data <- function(fire_season,
+                                 ssp_scenario){
+  
+  # Load required library
+  library(raster)
+  
+  # Define the climate data path based on the scenario
+  if (ssp_scenario == "historical") {
+    climate_data_path <- file.path("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data/historical")
+  } else {
+    climate_data_path <- file.path("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data",
+                                   paste0("ssp", as.character(ssp_scenario)))
+  }
+  
+  # List all variable folders in the climate data path
+  climate_data <- list.files(climate_data_path, full.names = TRUE)
+  
+  # Initialize an empty list to store monthly data for each variable
+  variable_list <- list(hurs = list(), pr = list(), tas = list(), tasmax = list(), tasmin = list(), sfcWind = list())
+  
+  # Loop over each variable folder
+  for (variable in climate_data) {
+    yearly_vars <- list.files(variable, full.names = TRUE)
+    message("Processing variable: ", basename(variable))
+    
+    # Loop over each year in the fire season
+    for (key in names(fire_season)) {
+      
+      # Construct the path for the specific year folder
+      year_folder <- file.path(variable, key)
+      if (!dir.exists(year_folder)) {
+        message("Year folder not found: ", year_folder)
+        next
+      }
+      
+      # List all files in the year folder
+      monthly_agg_list <- list.files(year_folder, full.names = TRUE)
+      
+      # Loop through monthly files
+      for (monthly_agg in monthly_agg_list) {
+        # Split the file name to extract the month
+        splitted_file_name <- strsplit(basename(monthly_agg), split = "_")[[1]]
+        if (length(splitted_file_name) < 2) {
+          message("Skipping file with unexpected name: ", monthly_agg)
+          next
+        }
+        
+        extracted_month <- splitted_file_name[2]  # Extract month from the file name
+        
+        # Check if the extracted month is in the fire season
+        if (extracted_month %in% fire_season[[key]]) {
+          variable_list[[basename(variable)]] <- 
+            append(variable_list[[basename(variable)]], monthly_agg)
+        }
+      }
+    }
+  }
+  
+  # Filter out variables with no data
+  empty_variables <- names(variable_list)[sapply(variable_list, length) == 0]
+  if (length(empty_variables) > 0) {
+    message("The following variables are empty and will be skipped: ", paste(empty_variables, collapse = ", "))
+  }
+  variable_list <- variable_list[sapply(variable_list, length) > 0]
+  
+  # Stack rasters for non-empty variables
+  clim_rast_stack <- lapply(variable_list, raster::stack)
+  
+  # Calculate the average for each raster stack
+  avg_fire_season_stackington <- lapply(clim_rast_stack, function(stack) {
+    calc(stack, fun = mean)
+  })
+  
+  # Define output paths
+  cmip6_fire_season_output <- file.path("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate", "fs_climate_data")
+  if (!dir.exists(cmip6_fire_season_output)) dir.create(cmip6_fire_season_output)
+  
+  cmip6_ssp <- file.path(cmip6_fire_season_output, paste0("SSP", as.character(ssp_scenario)))
+  if (!dir.exists(cmip6_ssp)) dir.create(cmip6_ssp)
+  
+  # Get the time range of the fire season
+  start <- names(fire_season)[1]
+  end <- names(fire_season)[length(fire_season)]
+  
+  # Save each averaged raster stack as a GeoTIFF
+  for (key in names(avg_fire_season_stackington)){
+    variable_rast <- avg_fire_season_stackington[[key]]
+    writeRaster(variable_rast,
+                filename = file.path(cmip6_ssp, paste0(key, "_", start, "-", end, ".tif")),
+                overwrite = TRUE)
+  }
+}
+
+
+
+fire_months <- readLines("/Users/yangyang/Documents/WildfireCodeYY/Data/stats/yearly_fire_seasonsfire_seasons.txt")
+print(fire_months)
+
+
+splitted <- strsplit(fire_months, " : ")
+
+
+years <- sapply(splitted, "[[", 1)
+months <- strsplit(sapply(splitted, "[[", 2), ", ")
+
+
+fire_season <- setNames(as.list(months), years)
+
+
+month_num <- list(Jan = "01", Feb = "02", Mar = "03", Apr = "04",
+                  May = "05", Jun = "06", Jul = "07", Aug = "08",
+                  Sep = "09", Oct = "10", Nov = "11", Dec = "12")
+fire_season <- lapply(fire_season, function(months) {
+  unname(sapply(months, function(month) month_num[[month]]))
+})
+cat("\nYour computed historical fire-seasons:\n")
+print(fire_season)
+
+
+future_fire_season <- list()
+for (year in 2015:2060) {
+  future_fire_season[[as.character(year)]] <- c("06", "07", "08", "09", "10")
+}
+print(future_fire_season)
+
+average_climate_data(fire_season, "historical")
+average_climate_data(future_fire_season, 245)
+average_climate_data(future_fire_season, 585)
+average_climate_data(future_fire_season, 126)
+```
+
+

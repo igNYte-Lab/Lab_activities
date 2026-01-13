@@ -1,0 +1,466 @@
+---
+title: "CMIP6_opener"
+output: html_document
+date: "2024-11-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+gc()
+```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+```{r}
+library(ncdf4) # package for netcdf manipulation
+# library(rgdal) # package for geospatial analysis
+library(ggplot2) # package for plotting
+# library(rstudioapi) # automatically get the directory
+library(stringr)
+library(terra) # package for raster manipulation
+library(sf)
+library(tmap)
+library(raster)
+```
+
+
+
+```{r}
+
+# Base directories
+path <- "/Users/yangyang/Documents/WildfireCodeYY"
+base_input_dir <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/cmip6_merged_data"
+base_output_dir <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data"
+ssp_list <- list.files(base_input_dir, full.names = TRUE)
+new_variable_dir <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data/SSP/historical"
+
+# Portugal shapefile path
+portugal_path <- paste0(path, "/Data/R_output_data/shapefiles/Portugal_cells.shp")
+portugal <- st_read(portugal_path, layer = "portugal_cells")
+
+# Double-checking CRS
+if (is.null(st_crs(portugal))) {
+  stop("Error: CRS for Portugal shapefile is undefined.")
+}
+
+# List all scenarios (e.g., ssp585, historical)
+scenario_folders <- list.files(base_input_dir, full.names = TRUE)
+cat("Scenarios: ", paste(basename(scenario_folders), collapse = ", "), "\n")
+
+fire_months <- readLines(paste0("/Users/yangyang/Documents/WildfireCodeYY/Data/stats/yearly_fire_seasonsfire_seasons.txt"))
+print(fire_months)
+
+# ":" split year and month
+splitted <- strsplit(fire_months, " : ")
+
+# Extract years and months
+years <- sapply(splitted, "[[", 1)
+months <- strsplit(sapply(splitted, "[[", 2), ", ")
+
+# Fire season dir
+fire_season <- setNames(as.list(months), years)
+
+
+month_num <- list(Jan = "01", Feb = "02", Mar = "03", Apr = "04",
+                  May = "05", Jun = "06", Jul = "07", Aug = "08",
+                  Sep = "09", Oct = "10", Nov = "11", Dec = "12")
+
+fire_season <- lapply(fire_season, function(months) {
+  unname(sapply(months, function(month) month_num[[month]]))
+})
+
+cat("\nYour computed historical fire-seasons:\n")
+print(fire_season)
+
+
+```
+```{r}
+
+open_cmip6 <- function(timeframe) {
+  for (ssp_folder in ssp_list) { 
+      print(ssp_folder)
+      
+      cat(paste0("\nScenario: ", basename(ssp_folder), "\n"))
+      
+      # now list the climate variables:
+      variable_list <- list.files(ssp_folder, full.names = TRUE)
+      print(variable_list)
+      output_folder = "/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data/"
+      ssp_output_folder <- paste0(output_folder, basename(ssp_folder))
+      
+      for (folder in variable_list) {
+          cat(paste0("\nCMIP6 Variable: ", basename(folder), "\n"))
+          
+          # store the nc files in a list to iterate over:
+          variable_dir = list.files(folder, pattern = "\\.nc$", full.names = TRUE)
+          for (nc in variable_dir) {
+              # Ensure the file opens correctly
+              cmip6 <- tryCatch(nc_open(nc), error = function(e) {
+                  cat("Error opening file:", nc, "\n")
+                  return(NULL)
+              })
+              if (is.null(cmip6)) {
+                  next  # Skip to the next file
+              }
+              
+              # Extract metadata
+              parts <- strsplit(basename(nc), "_")[[1]]
+              year_start <- parts[length(parts) - 1]
+              year_end <- gsub("\\.nc$", "", parts[length(parts)])
+              era <- paste0(year_start, "_", year_end)
+              
+              # Save metadata to a file
+              metadata_dir <- paste0(ssp_output_folder, "/", basename(folder), "/meta_data")
+              new_variable_dir <- paste0(ssp_output_folder, "/", basename(folder))
+              dir.create(metadata_dir, recursive = TRUE, showWarnings = FALSE)
+              sink(file = paste0(metadata_dir, "/", era, "_metadata.txt"))
+              print(cmip6)
+              sink()
+              
+              # Get variable names
+              available_vars <- names(cmip6$var)
+              print(available_vars)  
+              
+              # Choose vars
+              var_name <- NULL
+              if (basename(folder) %in% available_vars) {
+                  var_name <- basename(folder) 
+              } else if (length(available_vars) == 1) {
+                  var_name <- available_vars[1]  
+              } else {
+                  cat("Warning: Unable to determine variable name for folder:", basename(folder), "\n")
+              }
+              
+              # Check var_name 
+              if (is.null(var_name)) {
+                  cat("Skipping file: variable name could not be determined.\n")
+                  next
+              }
+              print(available_vars) 
+              print(basename(folder))  
+              
+              
+              
+               var_name <- NULL
+              if (basename(folder) %in% available_vars) {
+                  var_name <- basename(folder)  
+              } else if (length(available_vars) == 1) {
+                  var_name <- available_vars[1]  
+              } else {
+                  cat("Warning: Unable to determine variable name for file:", nc, "\n")
+                  nc_close(cmip6)
+                  next
+              }
+              
+              cat("Selected Variable Name:", var_name, "\n")  
+              
+              # extract lon and lat
+              lon <- tryCatch(ncvar_get(cmip6, "lon"), error = function(e) {
+                  cat("Error retrieving longitude for file:", nc, "\n")
+                  return(NULL)
+              })
+              lat <- tryCatch(ncvar_get(cmip6, "lat"), error = function(e) {
+                  cat("Error retrieving latitude for file:", nc, "\n")
+                  return(NULL)
+              })
+              time <- tryCatch(ncvar_get(cmip6, "time"), error = function(e) {
+                  cat("Error retrieving time for file:", nc, "\n")
+                  return(NULL)
+              })
+              
+              if (is.null(lon) || is.null(lat) || is.null(time)) {
+                  cat("Skipping file due to missing dimensions:", nc, "\n")
+                  nc_close(cmip6)
+                  next
+              }
+              
+              
+              fillvalue <- tryCatch(ncatt_get(cmip6, var_name, "missing_value"), error = function(e) {
+                  cat("Error retrieving missing value for variable:", var_name, "\n")
+                  return(NULL)
+              })
+              if (!is.null(fillvalue$value)) {
+                  cat("Missing Value:", fillvalue$value, "\n")
+              } else {
+                  cat("Warning: Missing value attribute not found for variable:", var_name, "\n")
+              }
+              
+              if (timeframe == "historical") {
+            
+                dates <- as.Date(time, origin = "1850-01-01")
+            
+              } else if (timeframe == 'future') {
+            
+                dates <- as.Date(time, origin = "2015-01-01")
+              }
+              # define the years for aggregation:
+              if (timeframe == "historical") {
+                
+                years_of_interest <- lapply(list(2001:2014)[[1]], as.character)
+              
+              } else if (timeframe == 'future') {
+                  
+                years_of_interest <- lapply(list(2015:2060)[[1]], as.character)
+                
+              }
+              # define bounding box - Portugal -10.27,36.52,-5.49,42.61
+              lon_min <- -10.27
+              lon_max <- -5.49
+              lat_min <- 36.52
+              lat_max <- 42.61
+              
+              # Convert -180 to 180 longitude bounds to 0 to 360 convention
+              # as seen on the meta data.
+              # basically, the meta data doesn't use negative values for longitude
+              # which we can see for the Portugal dataset.
+              
+              # this is in case a different study region is used.
+              
+              lon_min_0_360 <- ifelse(lon_min < 0, lon_min + 360, lon_min)
+              lon_max_0_360 <- ifelse(lon_max < 0, lon_max + 360, lon_max)
+              
+              # find indices that fall within the bounding box
+              lon_ind <- which(lon >= lon_min_0_360 & lon <= lon_max_0_360)
+              lat_ind <- which(lat >= lat_min & lat <= lat_max)
+              
+              cat("Longitude range:", range(lon[lon_ind]), "\n")
+              cat("Latitude range:", range(lat[lat_ind]), "\n")
+              cat("Portugal longitude range: -10.27 to -5.49\n")
+              cat("Portugal latitude range: 36.52 to 42.61\n")
+              
+                            
+              lon_values <- lon[lon_ind]  
+              lat_values <- lat[lat_ind]  
+              
+              lon_lat_grid <- expand.grid(lon = lon_values, lat = lat_values)
+              
+              plot(lon_lat_grid$lon, lon_lat_grid$lat, main = "Grid Points for Portugal",
+                   xlab = "Longitude", ylab = "Latitude", col = "blue", pch = 16)
+              
+              # 添加葡萄牙边界
+              plot(portugal, add = TRUE, border = "black")
+              plot(lon_lat_grid$lon, lon_lat_grid$lat, main = "Grid Points and Portugal Boundary",
+                   xlab = "Longitude", ylab = "Latitude", col = "blue", pch = 16)
+              
+              # 添加葡萄牙边界
+              plot(portugal, add = TRUE, border = "red", lwd = 2)
+              
+               # extract years and months for the entire dates vector
+              years <- format(dates, "%Y")
+              months <- format(dates, "%m")
+              # this section of code can be a bit convoluted but the idea is as follows:
+        
+              # 1. we keep track of the current year and month, initialised from our
+              #    years and months list.
+              # 2. we then loop through each time slice in the net cdf file.
+              # 3. after that, we check if the current year is in the years of interest
+              #    list we defined previously.
+              # 4. if it is, then we will check if the current year and current month 
+              #    is equal to the year/month in the value from the lists of that iteration.
+              # 5. if it isn't, then it means there's been a change in the month or year
+              #    and so we will need to process the last month's raster and save it 
+              # 6. if it is, however, we perform the netcdf processing (so extracting the 
+              #    data and converting it to a raster).
+              # 7. we also ensure that when we get to the end of the loop, the raster  
+              #    stack is processed and saved so that we can get the last month from the 
+              #    year's data.
+              
+              
+              # list of the monthly rasters
+              monthly_rasters <- list()
+              
+              # this is just for the print messages
+              first_iteration <- TRUE
+              # loop through each time slice in the netCDF file
+              for (i in 1:length(dates)) { # (7)
+               # if the current year is not of interest, skip this iteration
+              if (!(years[i] %in% years_of_interest)) { # (8)
+                next
+              }
+              
+              if (first_iteration || years[i] != current_year || months[i] != current_month) { # (9)
+            
+              # Check for the first iteration
+              if (first_iteration) {
+                current_year <- years[i]
+                current_month <- months[i]
+                first_iteration <- FALSE
+              }
+              
+              cat("\nCurrent year:", years[i],"\n")
+              cat("Current month:", months[i],"\n")
+              
+              
+              
+              
+              # it means there's been a change in either the month or year.
+              # this means we've moved on to the next month, and so the data needs
+              # to be processed (remember we are aggregating as monthly avg).
+              if (!first_iteration && length(monthly_rasters) > 0) { # (10)
+                  
+                # raster processing procedure: 
+                
+                # stack the rasters using terra's stacking functionality instead of 
+                # raster::stack (incompatible)
+                # ref - Matifou (2022)
+                # found at - https://stackoverflow.com/questions/71213802/terra-equivalent-for-rasterstack
+                monthly_stack <- rast(c(monthly_rasters))
+              
+                # compute the average across each cell
+                # ref - Bollans (2022)
+                # found at - https://gis.stackexchange.com/questions/430938/extracting-mean-of-multiple-spatrasters-using-terra
+                monthly_avg <- app(monthly_stack, fun = mean)
+              
+                # create a year directory:
+                year_output_dir <- paste0(new_variable_dir, "/", current_year)
+              
+                # save the monthly average raster
+                if (!dir.exists(year_output_dir)) { # (11)
+                  
+                  dir.create(year_output_dir)
+                  
+                } # (11)
+              
+                # save the monthly average raster with the appropriate name 
+                writeRaster(monthly_avg, 
+                            filename = paste0(year_output_dir,
+                                              "/",
+                                              var_name,
+                                              "_",
+                                              current_month,
+                                              "_",
+                                              "mean.tif"),
+                            overwrite = TRUE)
+              
+                # reset for the new month/year
+                monthly_rasters <- list()
+                
+                # update the current month and year
+                current_month <- months[i]
+                current_year <- years[i]
+              }
+              }
+             tryCatch({
+                # Dynamically select the variable name based on the folder name
+                var_name <- basename(folder)  # Use the folder name as the variable name
+                if (!(var_name %in% names(cmip6$var))) {
+                    stop(paste("Variable", var_name, "not found in NetCDF file"))
+                }
+                
+                # Extract NetCDF data for the selected variable
+                data <- ncvar_get(cmip6, var_name, 
+                                  start = c(min(lon_ind), min(lat_ind), i), 
+                                  count = c(length(lon_ind), length(lat_ind), 1))
+                
+                # Handle missing values by replacing them with NA
+                fillvalue <- ncatt_get(cmip6, var_name, "missing_value")
+                if (!is.null(fillvalue$value)) {
+                    data[data == fillvalue$value] <- NA  # Replace missing values with NA
+                } else {
+                    warning("Missing value attribute not found for variable:", var_name)
+                }
+                
+                # Unit conversion based on the variable type
+                if (var_name == "pr") {
+                    # Convert precipitation flux (kg m-2 s-1) to mm/day
+                    data <- data * 86400
+                } else if (var_name %in% c("tas", "tasmax", "tasmin")) {
+                    # Convert temperature from Kelvin to Celsius
+                    data <- data - 273.15
+                }
+                
+                # Create a raster from the data
+                # Define the extent based on the bounding box (lon and lat indices)
+                lon_res <- mean(diff(lon)); lat_res <- mean(diff(lat))
+                extent <- c(
+                  min(lon[lon_ind]) - 2 * lon_res,   # xmin − 1.5 cells
+                  max(lon[lon_ind]) + 2 * lon_res,   # xmax + 1.5 cells
+                  min(lat[lat_ind]) - 2 * lat_res,   # ymin − 1.5 cells
+                  max(lat[lat_ind]) + 2 * lat_res    # ymax + 1.5 cells
+                )
+                # extent <- c(min(lon[lon_ind]), max(lon[lon_ind]), 
+                #             min(lat[lat_ind]), max(lat[lat_ind]))
+                
+                # Create the raster using the terra package
+                nc_raster <- terra::rast(t(data),
+                                     ext = extent,
+                                     crs = terra::crs("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0")
+                )
+                
+                # Flip the raster to correct its orientation
+                flipped_raster <- terra::flip(nc_raster, direction = "vertical")
+                
+                # Reproject the raster to match the CRS of the study area (Portugal)
+                daily_raster <- project(flipped_raster,
+                                    st_crs(portugal)$proj4string,
+                                    method = "near") 
+                
+                # Optional: Plot the daily raster for visualization
+                plot(daily_raster, main = paste0(years[i], " ", months[i]))
+                
+                # Append the processed daily raster to the list of monthly rasters
+                monthly_rasters <- append(monthly_rasters, list(daily_raster))
+                
+              }, error = function(e) { # Error handling block
+                  cat("Error encountered for time slice", i, "- Skipping this slice.\n")
+              })
+                
+                # handle the last month after the loop
+              if (length(monthly_rasters) > 0) { # (12)
+
+                # raster aggregation procedure (as defined above):
+                monthly_stack <- rast(c(monthly_rasters))
+                monthly_avg <- app(monthly_stack, fun = mean)
+
+                # recalculate year_output_dir before writing the last month's raster
+                year_output_dir <- paste0(new_variable_dir, "/", current_year)
+
+              if (!dir.exists(year_output_dir)) { # (13)
+
+                dir.create(year_output_dir)
+
+              } # (13)
+
+              writeRaster(monthly_avg,
+                          filename = paste0(year_output_dir,
+                                            "/",
+                                            var_name,
+                                            "_",
+                                            current_month,
+                                            "_",
+                                            "mean.tif"),
+                          overwrite = TRUE)
+
+            }
+          }
+      }
+      }
+  }
+}
+
+open_cmip6(timeframe = "historical")
+open_cmip6(timeframe = "future")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

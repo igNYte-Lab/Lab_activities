@@ -1,0 +1,357 @@
+---
+title: "MergeML212"
+output: html_document
+date: "2025-02-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(raster)
+library(sf)
+library(terra)
+library(rstudioapi)
+```
+
+```{r}
+# set the directory:
+path <- dirname(getActiveDocumentContext()$path)
+
+# If the data is not being loaded, it can be accessed via the 'Data' Folder.
+setwd(path)
+```
+
+```{r}
+downscale_crop_mask_to_river <- function(clim_path, river_raster_path, output_path) {
+
+  if (!file.exists(river_raster_path)) {
+    stop(paste("River raster file does not exist:", river_raster_path))
+  }
+  
+
+  river_raster <- raster(river_raster_path)
+  
+
+  scenarios <- list.dirs(clim_path, recursive = FALSE, full.names = TRUE)
+  
+
+  if (length(scenarios) == 0) {
+    stop(paste("No scenario directories found in path:", clim_path))
+  }
+  
+
+  all_processed_files <- list()
+  
+  for (scenario_path in scenarios) {
+
+    scenario_name <- basename(scenario_path)
+
+    scenario_output_path <- file.path(output_path, scenario_name)
+    
+
+    if (!dir.exists(scenario_output_path)) {
+      dir.create(scenario_output_path, recursive = TRUE)
+    }
+    
+
+    clim_files <- list.files(scenario_path, pattern = "\\.tif$", full.names = TRUE)
+    
+
+    if (length(clim_files) == 0) {
+      cat("No climate files found in scenario:", scenario_name, "\n")
+      next
+    }
+    
+
+    processed_files <- list()
+    
+    for (file in clim_files) {
+
+      if (!file.exists(file)) {
+        cat("Skipping file (does not exist):", file, "\n")
+        next
+      }
+      
+
+      clim_raster <- tryCatch({
+        raster(file)
+      }, error = function(e) {
+        stop(paste("Error reading climate file:", file, "Error:", e$message))
+      })
+      
+
+      clim_cropped <- tryCatch({
+        crop(clim_raster, river_raster)
+      }, error = function(e) {
+        stop(paste("Error cropping climate file:", file, "Error:", e$message))
+      })
+      
+
+      clim_resampled <- tryCatch({
+        resample(clim_cropped, river_raster, method = "bilinear")
+      }, error = function(e) {
+        stop(paste("Error resampling climate file:", file, "Error:", e$message))
+      })
+
+      clim_masked <- tryCatch({
+        mask(clim_resampled, river_raster)
+      }, error = function(e) {
+        stop(paste("Error masking climate file:", file, "Error:", e$message))
+      })
+      
+
+      output_file <- file.path(scenario_output_path, paste0(basename(file)))
+      tryCatch({
+        writeRaster(clim_masked, output_file, format = "GTiff", overwrite = TRUE)
+      }, error = function(e) {
+        stop(paste("Error saving processed file:", output_file, "Error:", e$message))
+      })
+      
+
+      processed_files[[basename(file)]] <- output_file
+    }
+    
+
+    all_processed_files[[scenario_name]] <- processed_files
+  }
+  
+  return(all_processed_files)
+}
+
+
+
+clim_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/climate_data"
+river_raster_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/rivers/portugal_proximity_river_map/river_proximity_map.tif"
+output_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/climate_data/downscaled"
+if (!dir.exists(output_path)) {
+  dir.create(output_path, recursive = TRUE)
+}
+
+processed_files <- downscale_crop_mask_to_river(clim_path, river_raster_path, output_path)
+
+
+print(processed_files)
+```
+```{r}
+data_fusion <- function(data_path, AOI, status, ssp_scenario) {
+  cat("\nCurrent Dataset: ", basename(data_path), "\n")
+  
+  # Handle SSP scenarios
+  if (ssp_scenario %in% c(126,245, 585)) {
+    data_dir <- list.files(data_path, full.names = TRUE, pattern = paste0("SSP", ssp_scenario))
+  } else {
+    data_dir <- list.files(data_path, full.names = TRUE)
+  }
+  
+  # Prepare lists to hold raster files and field names
+  raster_stack_list <- list()
+  field_names <- list()
+  
+  # Iterate through directories
+  for (folder in data_dir) {
+    folder_list <- list.files(folder, full.names = TRUE, pattern = "\\.(tif|tiff)$")
+    for (file in folder_list) {
+      raster_stack_list <- append(raster_stack_list, file)
+      field_names <- append(field_names, basename(file))
+    }
+  }
+  
+  # Print all raster files used in the stack
+  cat("\nFiles included in RasterStack before filtering:\n", paste(raster_stack_list, collapse = "\n"), "\n")
+  
+  # Filter files for historical and future scenarios
+  if (status == 'historical') {
+    # Remove files related to the future (2015-2060) or containing "future" in their names
+    discard_raster <- grepl("_2015-2060\\.tif$", raster_stack_list) | grepl("future", raster_stack_list)
+    discard_field_names <- grepl("_2015-2060$", field_names) | grepl("future", field_names)
+    raster_stack_list <- raster_stack_list[!discard_raster]
+    field_names <- field_names[!discard_field_names]
+    
+    # Further clean up: Remove files containing "_PP_" from both lists
+    pp_raster <- grepl("_PP_", raster_stack_list)
+    raster_stack_list <- raster_stack_list[!pp_raster]
+    field_names <- field_names[!pp_raster]
+    
+    # Final clean-up of field names
+    field_names <- sub("_2001-2014", "", field_names)
+    field_names <- sub("present_", "", field_names)
+    field_names <- sub("TSS_", "", field_names)
+    
+  } else if (status == 'future') {
+    # Remove files related to the past (2001-2014) or containing "present" in their names
+    discard_raster <- grepl("_2001-2014\\.tif$", raster_stack_list) | grepl("present", raster_stack_list)
+    discard_field_names <- grepl("_2001-2014$", field_names) | grepl("present", field_names)
+    raster_stack_list <- raster_stack_list[!discard_raster]
+    field_names <- field_names[!discard_field_names]
+    
+    # Further clean up: Remove files containing "_PP_" from both lists
+    pp_raster <- grepl("_PP_", raster_stack_list)
+    raster_stack_list <- raster_stack_list[!pp_raster]
+    field_names <- field_names[!pp_raster]
+    
+    # Final clean-up of field names
+    field_names <- sub("_2015-2060", "", field_names)
+    field_names <- sub("future_", "", field_names)
+    field_names <- sub("TSS_", "", field_names)
+  }
+  
+  # Print filtered raster files
+  cat("\nFiles included in RasterStack after filtering:\n", paste(raster_stack_list, collapse = "\n"), "\n")
+  
+  # Create a RasterStack
+  raster_stack <- tryCatch({
+    raster::stack(raster_stack_list)
+  }, error = function(e) {
+    stop("Error creating RasterStack: ", e$message)
+  })
+  
+  # Update metadata
+  for (i in 1:nlayers(raster_stack)) {
+    raster_stack[[i]] <- setMinMax(raster_stack[[i]])
+  }
+  
+  # Check for Modis-specific processing
+  if (grepl("Modis", basename(data_path))) {
+    cat("Processing Modis data...\n")
+    aggregated_wf <- tryCatch({
+      calc(raster_stack, fun = function(x) {
+        if (all(is.na(x))) {
+          return(NA)
+        } else {
+          return(max(x, na.rm = TRUE))
+        }
+      }, filename = tempfile())
+    }, error = function(e) {
+      stop("Error during calc operation: ", e$message)
+    })
+    
+    aggregated_wf_poly <- rasterToPoints(aggregated_wf)
+    aggregated_wf_poly <- data.frame(aggregated_wf_poly)
+    names(aggregated_wf_poly) <- c("Lon", "Lat", "modis_wf")
+    ref_crs <- st_crs(AOI)
+    aggregated_wf_poly <- st_as_sf(aggregated_wf_poly, coords = c("Lon", "Lat"), crs = ref_crs)
+    AOI <- st_join(AOI, aggregated_wf_poly, join = st_intersects)
+  } else {
+    cat("Processing non-Modis data...\n")
+    
+    layer_name_mapping <- list(
+      "hurs" = "hurs",
+      "pr" = "pr",
+      "tasmax" = "tasmax",
+      "tasmin" = "tasmin",
+      "tas" = "tas",
+      "sfcWind" = "sfcWind",
+      "aspect" = "aspect",
+      "DEM" = "DEM",
+      "slope" = "slope",
+      "river" = "river",
+      "Acacia" = "Acacia",
+      "Castanea sativa" = "Cstnstv",      
+      "Eucalyptus" = "Eclypts",
+      "Pinus pinaster" = "Pnspnst",
+      "Pinus pinea" = "Pinuspn",          
+      "Quercus rotundifolia" = "Qrcsrtn",
+      "Quercus suber" = "Qrcssbr",
+      "mods_wf" = "mods_wf"
+  )
+    
+    for (i in 1:nlayers(raster_stack)) {
+      current_layer <- raster_stack[[i]]
+      data_poly <- rasterToPoints(current_layer)
+      data_poly <- data.frame(data_poly)
+      
+
+      file_path <- raster_stack_list[i]  
+      
+     
+      if (data_path == rivers_path) {
+        
+        matched_name <- ifelse(grepl("river", file_path, fixed = TRUE), "river", NULL)
+      } else if (data_path == historical_maxent_path) {
+        
+        matched_name <- NULL
+        for (keyword in c("Acacia", "Castanea sativa", "Eucalyptus", "Pinus pinaster", "Pinus pinea", "Quercus rotundifolia", "Quercus suber")) {
+          if (grepl(keyword, file_path, fixed = TRUE)) {
+            matched_name <- layer_name_mapping[[keyword]]
+            break
+          }
+        }
+      } else if (data_path == topography_path) {
+       
+        matched_name <- NULL
+        for (keyword in c("aspect", "DEM", "slope")) {
+          if (grepl(keyword, file_path, fixed = TRUE)) {
+            matched_name <- layer_name_mapping[[keyword]]
+            break
+          }
+        }
+      } else {
+        # match name 
+        matched_name <- NULL
+        for (keyword in names(layer_name_mapping)) {
+          if (grepl(keyword, file_path)) {
+            matched_name <- layer_name_mapping[[keyword]]
+            break
+          }
+        }
+      }
+      
+     
+      if (is.null(matched_name)) {
+        stop(paste("No matching column name found for file:", file_path))
+      }
+      
+      
+      names(data_poly) <- c("Lon", "Lat", matched_name)
+      
+      
+      ref_crs <- st_crs(AOI)
+      data_poly <- st_as_sf(data_poly, coords = c("Lon", "Lat"), crs = ref_crs)
+      AOI <- st_join(AOI, data_poly, join = st_intersects)
+    }
+  }
+  
+  # Shorten field names for compatibility
+  short_names <- make.unique(substr(names(AOI), 1, 10))
+  names(AOI) <- short_names
+  
+  return(AOI)
+}
+
+```
+
+
+```{r}
+# path to polygon data:
+AOI_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/R_output_data/shapefiles/Portugal_cells.shp"
+clim_path <- paste0(dirname(path), "/WildfireCodeYY/Data/Final/climate_data/downscaled")
+topography_path <-  paste0(dirname(path), "/WildfireCodeYY/Data/Final/Topography")
+modis_path <- paste0(dirname(path), "/WildfireCodeYY/Data/Final/Modis")
+rivers_path <- paste0(dirname(path), "/WildfireCodeYY/Data/Final/rivers")
+historical_maxent_path <- paste0(dirname(path), "/WildfireCodeYY/Data/Final/Vegetation/maxent_outputs/SSP245")
+future_maxent_path_126 <- paste0(dirname(path), "/WildfireCodeYY/Data/Final/maxent_outputs/SSP126")
+AOI3 <- st_read (AOI_path, layer = "Portugal_cells")
+AOI3 <- data_fusion(clim_path, AOI3, "future", ssp_scenario = 126)
+AOI3 <- data_fusion(topography_path, AOI3, "future", ssp_scenario = 0)
+AOI3 <- data_fusion(rivers_path, AOI3, "future", ssp_scenario = 0)
+AOI3 <- data_fusion(future_maxent_path_126, AOI3, status = "future", ssp_scenario = 0)
+#
+st_write(AOI3, paste0("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/ML_input/maxent_future_126.shp"),delete_layer = TRUE)
+```
+
+```{r}
+future_maxent_path_585 <- paste0(dirname(path), "/WildfireCodeYY/Data/Final/maxent_outputs/SSP585")
+AOI585 <- st_read (AOI_path, layer = "Portugal_cells")
+AOI585 <- data_fusion(clim_path, AOI585, "future", ssp_scenario = 585)
+AOI585 <- data_fusion(topography_path, AOI585, "future", ssp_scenario = 0)
+AOI585 <- data_fusion(rivers_path, AOI585, "future", ssp_scenario = 0)
+AOI585 <- data_fusion(future_maxent_path_585, AOI585, status = "future", ssp_scenario = 0)
+#
+st_write(AOI585, paste0("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/ML_input/maxent_future_585.shp"),delete_layer = TRUE)
+```
+
+```
+
+

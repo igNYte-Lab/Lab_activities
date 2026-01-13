@@ -1,0 +1,1331 @@
+---
+title: "Bioclim"
+output: html_document
+date: "2024-11-25"
+---
+
+```{r}
+library(ncdf4) # package for netcdf manipulation
+library(raster) # package for raster manipulation
+#library(rgdal) # package for geospatial analysis
+library(ggplot2) # package for plotting
+library(rstudioapi) # automatically get the directory
+library(stringr)
+library(dismo)
+```
+
+```{r}
+# ---------------------------------------------------------------------------
+# Compute BIOCLIM variables for *every* scenario folder that sits under
+#   /…/Intermediate/climate_data/
+#
+# For each scenario (e.g.  historical, ssp126, ssp245, ssp585) the script:
+#   1. loops through its year sub-folders (2015, 2016, …)
+#   2. builds 12-layer stacks of tasmax / tasmin / pr
+#   3. runs biovars()  →  19 BIOCLIM rasters
+#   4. writes them to
+#        /…/Intermediate/BioClim/<SCENARIO>/<YEAR>/bio_<…>.tif
+# ---------------------------------------------------------------------------
+
+
+# ---------- 1. root folders -------------------------------------------------
+clim_root  <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data"
+bioc_root  <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/BioClim"
+
+# list immediate sub-folders: “historical”, “ssp126”, “ssp245”, “ssp585”, …
+scen_dirs  <- list.dirs(clim_root, full.names = TRUE, recursive = FALSE)
+
+# ---------- 2. scenario loop -----------------------------------------------
+for (SSP_dir in scen_dirs) {
+  
+  scen_name <- basename(SSP_dir)                       # e.g. "ssp585"
+  cat("\n================  SCENARIO:", scen_name, "================\n")
+  
+  # create matching output root: …/BioClim/ssp585
+  scen_out_dir <- file.path(bioc_root, scen_name)
+  dir.create(scen_out_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  # ---------- 3. year loop --------------------------------------------------
+  year_folders <- list.dirs(SSP_dir, full.names = TRUE, recursive = FALSE)
+  for (year_folder in year_folders) {
+    
+    year <- basename(year_folder)
+    cat("\nProcessing year:", year, "\n")
+    
+    year_out_dir <- file.path(scen_out_dir, year)
+    dir.create(year_out_dir, showWarnings = FALSE)
+    
+    files      <- list.files(year_folder, full.names = TRUE)
+    tmax_files <- grep("tasmax", files, value = TRUE)
+    tmin_files <- grep("tasmin", files, value = TRUE)
+    pr_files   <- grep("\\bpr",   files, value = TRUE)  # avoid “tasmin*pr*” collision
+    
+    # need all 12 monthly rasters for each variable
+    if (length(tmax_files) < 12 || length(tmin_files) < 12 || length(pr_files) < 12) {
+      cat("  >> Skipping year", year, "- insufficient monthly files.\n")
+      next
+    }
+    
+    # ---------- 4. build stacks & BIOCLIM -----------------------------------
+    cat("  • building raster stacks …\n")
+    tmax_stack <- stack(tmax_files)
+    tmin_stack <- stack(tmin_files)
+    pr_stack   <- stack(pr_files)
+    
+    cat("  • computing BIOCLIM variables …\n")
+    bio <- biovars(prec = pr_stack, tmin = tmin_stack, tmax = tmax_stack)
+    
+    # ---------- 5. write each BIOCLIM layer ---------------------------------
+    for (j in seq_len(nlayers(bio))) {
+      layer   <- bio[[j]]
+      outname <- paste0(names(layer), "_", year, ".tif")
+      writeRaster(layer,
+                  filename = file.path(year_out_dir, outname),
+                  overwrite = TRUE)
+    }
+    cat("  >> BIOCLIM written to", year_out_dir, "\n")
+  } # ---- end year loop ----
+}   # ---- end scenario loop ----
+```
+
+
+```{r}
+library(raster)
+library(dismo)
+
+# Base paths
+path <- "/Users/yangyang/Documents/WildfireRebuttal"
+SSP_dir <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data/ssp245")
+print(SSP_dir)
+
+bioclim_output_dir <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/BioClim/SSP245")
+dir.create(bioclim_output_dir, recursive = TRUE, showWarnings = FALSE)
+print(bioclim_output_dir)
+
+# Variables to process
+variables <- c("tasmax", "tasmin", "pr")
+
+# Loop over years based on subfolders within the first variable
+years <- list.files(file.path(SSP_dir, variables[1]))
+for (year in years) {
+  
+  cat("\nProcessing year:", year, "\n")
+  
+  yearly_bioclim_output_dir <- file.path(bioclim_output_dir, year)
+  dir.create(yearly_bioclim_output_dir, showWarnings = FALSE)
+  
+  # Initialize lists to collect files for each variable
+  tmax_files <- list.files(file.path(SSP_dir, "tasmax", year), pattern = "\\.tif$", full.names = TRUE)
+  tmin_files <- list.files(file.path(SSP_dir, "tasmin", year), pattern = "\\.tif$", full.names = TRUE)
+  pr_files <- list.files(file.path(SSP_dir, "pr", year), pattern = "\\.tif$", full.names = TRUE)
+  
+  # Check if all variables have at least 12 monthly files
+  if (length(tmax_files) < 12 || length(tmin_files) < 12 || length(pr_files) < 12) {
+    cat("Skipping year", year, "- insufficient files.\n")
+    next
+  }
+  
+  # Stack rasters for each variable
+  tmax_stack <- raster::stack(tmax_files)
+  tmin_stack <- raster::stack(tmin_files)
+  pr_stack <- raster::stack(pr_files)
+  
+  # Compute bioclimatic variables
+  bioclim <- biovars(prec = pr_stack, tmin = tmin_stack, tmax = tmax_stack)
+  cat("Biovars computed for year", year, "\n")
+  
+  # Save each bioclimatic variable as a separate GeoTIFF
+  for (j in 1:nlayers(bioclim)) {
+    biovar <- bioclim[[j]]
+    bio_var_suffix <- paste0(names(biovar), "_", year)
+    writeRaster(biovar, 
+                filename = file.path(yearly_bioclim_output_dir, paste0(bio_var_suffix, ".tif")), 
+                overwrite = TRUE)
+  }
+}
+```
+
+```{r}
+library(raster)
+library(dismo)
+
+# Base paths
+path <- "/Users/yangyang/Documents/WildfireRebuttal"
+SSP_dir <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data/ssp126")
+print(SSP_dir)
+
+bioclim_output_dir <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/BioClim/SSP126")
+dir.create(bioclim_output_dir, recursive = TRUE, showWarnings = FALSE)
+print(bioclim_output_dir)
+
+# Variables to process
+variables <- c("tasmax", "tasmin", "pr")
+
+# Loop over years based on subfolders within the first variable
+years <- list.files(file.path(SSP_dir, variables[1]))
+for (year in years) {
+  
+  cat("\nProcessing year:", year, "\n")
+  
+  yearly_bioclim_output_dir <- file.path(bioclim_output_dir, year)
+  dir.create(yearly_bioclim_output_dir, showWarnings = FALSE)
+  
+  # Initialize lists to collect files for each variable
+  tmax_files <- list.files(file.path(SSP_dir, "tasmax", year), pattern = "\\.tif$", full.names = TRUE)
+  tmin_files <- list.files(file.path(SSP_dir, "tasmin", year), pattern = "\\.tif$", full.names = TRUE)
+  pr_files <- list.files(file.path(SSP_dir, "pr", year), pattern = "\\.tif$", full.names = TRUE)
+  
+  # Check if all variables have at least 12 monthly files
+  if (length(tmax_files) < 12 || length(tmin_files) < 12 || length(pr_files) < 12) {
+    cat("Skipping year", year, "- insufficient files.\n")
+    next
+  }
+  
+  # Stack rasters for each variable
+  tmax_stack <- raster::stack(tmax_files)
+  tmin_stack <- raster::stack(tmin_files)
+  pr_stack <- raster::stack(pr_files)
+  
+  # Compute bioclimatic variables
+  bioclim <- biovars(prec = pr_stack, tmin = tmin_stack, tmax = tmax_stack)
+  cat("Biovars computed for year", year, "\n")
+  
+  # Save each bioclimatic variable as a separate GeoTIFF
+  for (j in 1:nlayers(bioclim)) {
+    biovar <- bioclim[[j]]
+    bio_var_suffix <- paste0(names(biovar), "_", year)
+    writeRaster(biovar, 
+                filename = file.path(yearly_bioclim_output_dir, paste0(bio_var_suffix, ".tif")), 
+                overwrite = TRUE)
+  }
+}
+```
+
+
+
+```{r}
+library(raster)
+library(dismo)
+
+# Base paths
+path <- "/Users/yangyang/Documents/WildfireRebuttal"
+SSP_dir <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/climate_data/ssp585")
+print(SSP_dir)
+
+bioclim_output_dir <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Intermediate/BioClim/SSP585")
+dir.create(bioclim_output_dir, recursive = TRUE, showWarnings = FALSE)
+print(bioclim_output_dir)
+
+# Variables to process
+variables <- c("tasmax", "tasmin", "pr")
+
+# Loop over years based on subfolders within the first variable
+years <- list.files(file.path(SSP_dir, variables[1]))
+for (year in years) {
+  
+  cat("\nProcessing year:", year, "\n")
+  
+  yearly_bioclim_output_dir <- file.path(bioclim_output_dir, year)
+  dir.create(yearly_bioclim_output_dir, showWarnings = FALSE)
+  
+  # Initialize lists to collect files for each variable
+  tmax_files <- list.files(file.path(SSP_dir, "tasmax", year), pattern = "\\.tif$", full.names = TRUE)
+  tmin_files <- list.files(file.path(SSP_dir, "tasmin", year), pattern = "\\.tif$", full.names = TRUE)
+  pr_files <- list.files(file.path(SSP_dir, "pr", year), pattern = "\\.tif$", full.names = TRUE)
+  
+  # Check if all variables have at least 12 monthly files
+  if (length(tmax_files) < 12 || length(tmin_files) < 12 || length(pr_files) < 12) {
+    cat("Skipping year", year, "- insufficient files.\n")
+    next
+  }
+  
+  # Stack rasters for each variable
+  tmax_stack <- raster::stack(tmax_files)
+  tmin_stack <- raster::stack(tmin_files)
+  pr_stack <- raster::stack(pr_files)
+  
+  # Compute bioclimatic variables
+  bioclim <- biovars(prec = pr_stack, tmin = tmin_stack, tmax = tmax_stack)
+  cat("Biovars computed for year", year, "\n")
+  
+  # Save each bioclimatic variable as a separate GeoTIFF
+  for (j in 1:nlayers(bioclim)) {
+    biovar <- bioclim[[j]]
+    bio_var_suffix <- paste0(names(biovar), "_", year)
+    writeRaster(biovar, 
+                filename = file.path(yearly_bioclim_output_dir, paste0(bio_var_suffix, ".tif")), 
+                overwrite = TRUE)
+  }
+}
+```
+
+
+
+
+```{r}
+# Base paths
+path <- "/Users/yangyang/Documents/WildfireRebuttal"
+SSP_dir <- file.path(path, "Data/Intermediate/climate_data/historical")
+print(SSP_dir)
+
+bioclim_output_dir <- file.path(path, "Data/Intermediate/BioClim/historical")
+dir.create(bioclim_output_dir, recursive = TRUE, showWarnings = FALSE)
+print(bioclim_output_dir)
+
+# Variables to process
+variables <- c("tasmax", "tasmin", "pr")
+
+# Loop over years based on subfolders within the first variable
+years <- list.files(file.path(SSP_dir, variables[1]))
+for (year in years) {
+  
+  cat("\nProcessing year:", year, "\n")
+  
+  yearly_bioclim_output_dir <- file.path(bioclim_output_dir, year)
+  dir.create(yearly_bioclim_output_dir, showWarnings = FALSE)
+  
+  # Initialize lists to collect files for each variable
+  tmax_files <- list.files(file.path(SSP_dir, "tasmax", year), pattern = "\\.tif$", full.names = TRUE)
+  tmin_files <- list.files(file.path(SSP_dir, "tasmin", year), pattern = "\\.tif$", full.names = TRUE)
+  pr_files <- list.files(file.path(SSP_dir, "pr", year), pattern = "\\.tif$", full.names = TRUE)
+  
+  # Check if all variables have at least 12 monthly files
+  if (length(tmax_files) < 12 || length(tmin_files) < 12 || length(pr_files) < 12) {
+    cat("Skipping year", year, "- insufficient files.\n")
+    next
+  }
+  
+  # Stack rasters for each variable
+  tmax_stack <- raster::stack(tmax_files)
+  tmin_stack <- raster::stack(tmin_files)
+  pr_stack <- raster::stack(pr_files)
+  
+  # Compute bioclimatic variables
+  bioclim <- biovars(prec = pr_stack, tmin = tmin_stack, tmax = tmax_stack)
+  cat("Biovars computed for year", year, "\n")
+  
+  # Save each bioclimatic variable as a separate GeoTIFF
+  for (j in 1:nlayers(bioclim)) {
+    biovar <- bioclim[[j]]
+    bio_var_suffix <- paste0(names(biovar), "_", year)
+    writeRaster(biovar, 
+                filename = file.path(yearly_bioclim_output_dir, paste0(bio_var_suffix, ".tif")), 
+                overwrite = TRUE)
+  }
+}
+```
+
+
+
+```{r}
+path<- "/Users/yangyang/Documents/WildfireRebuttal"
+
+average_biovars <- function(start,
+                            end, 
+                            ssp_scenario){
+  
+  bc_dir <- paste0(path, "/Data/Intermediate/BioClim/SSP126")
+  
+    
+  bc_folders <- list.files(bc_dir, full.names = TRUE)
+  
+  
+  # this is a bit of a shit way to do this but currently i can't 
+  # think of anything else: 
+  
+  # there are 19 bio_variables
+  
+  bioclim_stack <- list(Bio_01 = list(),
+                        Bio_02 = list(),
+                        Bio_03 = list(),
+                        Bio_04 = list(),
+                        Bio_05 = list(),
+                        Bio_06 = list(),
+                        Bio_07 = list(),
+                        Bio_08 = list(),
+                        Bio_09 = list(),
+                        Bio_10 = list(),
+                        Bio_11 = list(),
+                        Bio_12 = list(),
+                        Bio_13 = list(),
+                        Bio_14 = list(),
+                        Bio_15 = list(),
+                        Bio_16 = list(),
+                        Bio_17 = list(),
+                        Bio_18 = list(),
+                        Bio_19 = list())
+  
+  # for loop to extract the years that correspond to our era
+  for(i in start:end) {
+    
+    # loop over each year in the bioclim directory
+    for(folder in bc_folders) {
+      
+      # check if the year in the bioclim directory is the same as the current 
+      # iteration
+      if (basename(folder) == as.character(i)){
+        
+        # list the files
+        bioclim_list <- list.files(folder,
+                                   full.names = TRUE)
+
+        
+        # now iterate over each bioclimatic variable and append them to their 
+        # respective key in the list.
+        
+        for (bioclim in bioclim_list) {
+       
+          
+          # not the prettiest way of doing it but we will put the biovars
+          # 1 by 1 into their respective spots in the dictionary. 
+          
+          if (grepl('bio1_', basename(bioclim))) { 
+            
+            bioclim_stack$Bio_01 <- c(bioclim_stack$Bio_01, bioclim)
+            
+          } else if (grepl('bio2_', basename(bioclim))){
+            
+            bioclim_stack$Bio_02 <- c(bioclim_stack$Bio_02, bioclim)
+            
+          } else if (grepl('bio3_', basename(bioclim))){
+            
+            bioclim_stack$Bio_03 <- c(bioclim_stack$Bio_03, bioclim)
+            
+          } else if (grepl('bio4_', basename(bioclim))){
+            
+            bioclim_stack$Bio_04 <- c(bioclim_stack$Bio_04, bioclim)
+            
+          } else if (grepl('bio5_', basename(bioclim))){
+            
+            bioclim_stack$Bio_05 <- c(bioclim_stack$Bio_05, bioclim)
+            
+          } else if (grepl('bio6_', basename(bioclim))){
+            
+            bioclim_stack$Bio_06 <- c(bioclim_stack$Bio_06, bioclim)
+            
+          } else if (grepl('bio7_', basename(bioclim))){
+            
+            bioclim_stack$Bio_07 <- c(bioclim_stack$Bio_07, bioclim)
+            
+          } else if (grepl('bio8_', basename(bioclim))){
+            
+            bioclim_stack$Bio_08 <- c(bioclim_stack$Bio_08, bioclim)
+            
+          } else if (grepl('bio9_', basename(bioclim))){
+            
+            bioclim_stack$Bio_09 <- c(bioclim_stack$Bio_09, bioclim)
+            
+          } else if (grepl('bio10_', basename(bioclim))){
+            
+            bioclim_stack$Bio_10 <- c(bioclim_stack$Bio_10, bioclim)
+            
+          } else if (grepl('bio11_', basename(bioclim))){
+            
+            bioclim_stack$Bio_11 <- c(bioclim_stack$Bio_11, bioclim)
+            
+          } else if (grepl('bio12_', basename(bioclim))){
+            
+            bioclim_stack$Bio_12 <- c(bioclim_stack$Bio_12, bioclim)
+            
+          } else if (grepl('bio13_', basename(bioclim))){
+            
+            bioclim_stack$Bio_13 <- c(bioclim_stack$Bio_13, bioclim)
+            
+          } else if (grepl('bio14_', basename(bioclim))){
+            
+            bioclim_stack$Bio_14 <- c(bioclim_stack$Bio_14, bioclim)
+            
+          } else if (grepl('bio15_', basename(bioclim))){
+            
+            bioclim_stack$Bio_15 <- c(bioclim_stack$Bio_15, bioclim)
+            
+          } else if (grepl('bio16_', basename(bioclim))){
+            
+            bioclim_stack$Bio_16 <- c(bioclim_stack$Bio_16, bioclim)
+            
+          } else if (grepl('bio17_', basename(bioclim))){
+            
+            bioclim_stack$Bio_17 <- c(bioclim_stack$Bio_17, bioclim)
+            
+          } else if (grepl('bio18_', basename(bioclim))){
+            
+            bioclim_stack$Bio_18 <- c(bioclim_stack$Bio_18, bioclim)
+            
+          } else if (grepl('bio19_', basename(bioclim))){
+            
+            bioclim_stack$Bio_19 <- c(bioclim_stack$Bio_19, bioclim)
+            
+            } # end of segregating bioclim data based on biovars
+          
+          } # end of looping over bioclim in bioclim list
+        
+        } # end of checking if the name of the folder is in the era
+      
+      } # end of iterating through each year in the bioclim list
+  
+    } # end of iterating though the start and end date
+  
+  # at this point, we should have a dictionary where each biovar is separated
+  # by their biovar id instead of by year.
+  # we can apply a raster stack function to each value in the 
+  # dictionary
+  bioclim_rast_stack <- lapply(bioclim_stack, raster::stack)
+  
+  # now we just need to average it over the years:
+  avg_bioclims <- lapply(bioclim_rast_stack, function(stack) {
+    calc(stack, fun = mean)
+    })
+  
+  # create a new directory to hold this:
+  averaged_output <- paste0(path, 
+                            "/Data/Intermediate/Averaged_data")
+  
+  if (!dir.exists(averaged_output)){
+    dir.create(averaged_output)
+  }
+  
+  print(averaged_output)
+  
+  avg_bioclim_output <- paste0(averaged_output,
+                               "/",
+                               "SSP",
+                               as.character(ssp_scenario),
+                               "/Bioclim_avg")
+  
+  
+  if (!dir.exists(avg_bioclim_output)){
+    dir.create(avg_bioclim_output, recursive = TRUE)
+  }
+  
+  print(avg_bioclim_output)
+  
+  
+  # loop over every key in the list and save the raster in the Bioclim average
+  # directory:
+  
+  for (key in names(avg_bioclims)){
+    
+    cat(paste0("\nSaving ", key , " averaged over years ", start, "-", end, "." ))
+    
+    # we will have separate directories for years because we will put both the future 
+    # and past data in here.
+    final_bioclim_output_path <- paste0(avg_bioclim_output, "/", key)
+    
+    if (!dir.exists(final_bioclim_output_path)){
+      dir.create(final_bioclim_output_path)
+    }
+    
+    # extract the raster from that iteration  
+    bioclim_avg_raster <- avg_bioclims[[key]]
+    
+    raster::writeRaster(bioclim_avg_raster,
+                        filename = paste0(final_bioclim_output_path, 
+                                          "/", 
+                                          key,
+                                          "_",
+                                          start, "-", end,
+                                          ".tif"),
+                        overwrite = TRUE)
+      }
+  
+  } # end of average_biovars function
+ 
+
+# 2. future SSP585
+average_biovars(start=2015,
+                end = 2060,
+                ssp_scenario = 126)
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 245)
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 585)
+# average_biovars(start = 2001, 
+#                 end = 2014, 
+#                 ssp_scenario = "historical")
+
+
+```
+```{r}
+path<- "/Users/yangyang/Documents/WildfireRebuttal"
+
+average_biovars <- function(start,
+                            end, 
+                            ssp_scenario){
+  
+  bc_dir <- paste0(path, "/Data/Intermediate/BioClim/SSP245")
+  
+    
+  bc_folders <- list.files(bc_dir, full.names = TRUE)
+  
+  
+  # this is a bit of a shit way to do this but currently i can't 
+  # think of anything else: 
+  
+  # there are 19 bio_variables
+  
+  bioclim_stack <- list(Bio_01 = list(),
+                        Bio_02 = list(),
+                        Bio_03 = list(),
+                        Bio_04 = list(),
+                        Bio_05 = list(),
+                        Bio_06 = list(),
+                        Bio_07 = list(),
+                        Bio_08 = list(),
+                        Bio_09 = list(),
+                        Bio_10 = list(),
+                        Bio_11 = list(),
+                        Bio_12 = list(),
+                        Bio_13 = list(),
+                        Bio_14 = list(),
+                        Bio_15 = list(),
+                        Bio_16 = list(),
+                        Bio_17 = list(),
+                        Bio_18 = list(),
+                        Bio_19 = list())
+  
+  # for loop to extract the years that correspond to our era
+  for(i in start:end) {
+    
+    # loop over each year in the bioclim directory
+    for(folder in bc_folders) {
+      
+      # check if the year in the bioclim directory is the same as the current 
+      # iteration
+      if (basename(folder) == as.character(i)){
+        
+        # list the files
+        bioclim_list <- list.files(folder,
+                                   full.names = TRUE)
+
+        
+        # now iterate over each bioclimatic variable and append them to their 
+        # respective key in the list.
+        
+        for (bioclim in bioclim_list) {
+       
+          
+          # not the prettiest way of doing it but we will put the biovars
+          # 1 by 1 into their respective spots in the dictionary. 
+          
+          if (grepl('bio1_', basename(bioclim))) { 
+            
+            bioclim_stack$Bio_01 <- c(bioclim_stack$Bio_01, bioclim)
+            
+          } else if (grepl('bio2_', basename(bioclim))){
+            
+            bioclim_stack$Bio_02 <- c(bioclim_stack$Bio_02, bioclim)
+            
+          } else if (grepl('bio3_', basename(bioclim))){
+            
+            bioclim_stack$Bio_03 <- c(bioclim_stack$Bio_03, bioclim)
+            
+          } else if (grepl('bio4_', basename(bioclim))){
+            
+            bioclim_stack$Bio_04 <- c(bioclim_stack$Bio_04, bioclim)
+            
+          } else if (grepl('bio5_', basename(bioclim))){
+            
+            bioclim_stack$Bio_05 <- c(bioclim_stack$Bio_05, bioclim)
+            
+          } else if (grepl('bio6_', basename(bioclim))){
+            
+            bioclim_stack$Bio_06 <- c(bioclim_stack$Bio_06, bioclim)
+            
+          } else if (grepl('bio7_', basename(bioclim))){
+            
+            bioclim_stack$Bio_07 <- c(bioclim_stack$Bio_07, bioclim)
+            
+          } else if (grepl('bio8_', basename(bioclim))){
+            
+            bioclim_stack$Bio_08 <- c(bioclim_stack$Bio_08, bioclim)
+            
+          } else if (grepl('bio9_', basename(bioclim))){
+            
+            bioclim_stack$Bio_09 <- c(bioclim_stack$Bio_09, bioclim)
+            
+          } else if (grepl('bio10_', basename(bioclim))){
+            
+            bioclim_stack$Bio_10 <- c(bioclim_stack$Bio_10, bioclim)
+            
+          } else if (grepl('bio11_', basename(bioclim))){
+            
+            bioclim_stack$Bio_11 <- c(bioclim_stack$Bio_11, bioclim)
+            
+          } else if (grepl('bio12_', basename(bioclim))){
+            
+            bioclim_stack$Bio_12 <- c(bioclim_stack$Bio_12, bioclim)
+            
+          } else if (grepl('bio13_', basename(bioclim))){
+            
+            bioclim_stack$Bio_13 <- c(bioclim_stack$Bio_13, bioclim)
+            
+          } else if (grepl('bio14_', basename(bioclim))){
+            
+            bioclim_stack$Bio_14 <- c(bioclim_stack$Bio_14, bioclim)
+            
+          } else if (grepl('bio15_', basename(bioclim))){
+            
+            bioclim_stack$Bio_15 <- c(bioclim_stack$Bio_15, bioclim)
+            
+          } else if (grepl('bio16_', basename(bioclim))){
+            
+            bioclim_stack$Bio_16 <- c(bioclim_stack$Bio_16, bioclim)
+            
+          } else if (grepl('bio17_', basename(bioclim))){
+            
+            bioclim_stack$Bio_17 <- c(bioclim_stack$Bio_17, bioclim)
+            
+          } else if (grepl('bio18_', basename(bioclim))){
+            
+            bioclim_stack$Bio_18 <- c(bioclim_stack$Bio_18, bioclim)
+            
+          } else if (grepl('bio19_', basename(bioclim))){
+            
+            bioclim_stack$Bio_19 <- c(bioclim_stack$Bio_19, bioclim)
+            
+            } # end of segregating bioclim data based on biovars
+          
+          } # end of looping over bioclim in bioclim list
+        
+        } # end of checking if the name of the folder is in the era
+      
+      } # end of iterating through each year in the bioclim list
+  
+    } # end of iterating though the start and end date
+  
+  # at this point, we should have a dictionary where each biovar is separated
+  # by their biovar id instead of by year.
+  # we can apply a raster stack function to each value in the 
+  # dictionary
+  bioclim_rast_stack <- lapply(bioclim_stack, raster::stack)
+  
+  # now we just need to average it over the years:
+  avg_bioclims <- lapply(bioclim_rast_stack, function(stack) {
+    calc(stack, fun = mean)
+    })
+  
+  # create a new directory to hold this:
+  averaged_output <- paste0(path, 
+                            "/Data/Intermediate/Averaged_data")
+  
+  if (!dir.exists(averaged_output)){
+    dir.create(averaged_output)
+  }
+  
+  print(averaged_output)
+  
+  avg_bioclim_output <- paste0(averaged_output,
+                               "/",
+                               "SSP",
+                               as.character(ssp_scenario),
+                               "/Bioclim_avg")
+  
+  
+  if (!dir.exists(avg_bioclim_output)){
+    dir.create(avg_bioclim_output, recursive = TRUE)
+  }
+  
+  print(avg_bioclim_output)
+  
+  
+  # loop over every key in the list and save the raster in the Bioclim average
+  # directory:
+  
+  for (key in names(avg_bioclims)){
+    
+    cat(paste0("\nSaving ", key , " averaged over years ", start, "-", end, "." ))
+    
+    # we will have separate directories for years because we will put both the future 
+    # and past data in here.
+    final_bioclim_output_path <- paste0(avg_bioclim_output, "/", key)
+    
+    if (!dir.exists(final_bioclim_output_path)){
+      dir.create(final_bioclim_output_path)
+    }
+    
+    # extract the raster from that iteration  
+    bioclim_avg_raster <- avg_bioclims[[key]]
+    
+    raster::writeRaster(bioclim_avg_raster,
+                        filename = paste0(final_bioclim_output_path, 
+                                          "/", 
+                                          key,
+                                          "_",
+                                          start, "-", end,
+                                          ".tif"),
+                        overwrite = TRUE)
+      }
+  
+  } # end of average_biovars function
+ 
+
+# 2. future SSP585
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 126)
+average_biovars(start=2015,
+                end = 2060,
+                ssp_scenario = 245)
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 585)
+# average_biovars(start = 2001, 
+#                 end = 2014, 
+#                 ssp_scenario = "historical")
+
+
+```
+```{r}
+path<- "/Users/yangyang/Documents/WildfireRebuttal"
+
+average_biovars <- function(start,
+                            end, 
+                            ssp_scenario){
+  
+  bc_dir <- paste0(path, "/Data/Intermediate/BioClim/SSP585")
+  
+    
+  bc_folders <- list.files(bc_dir, full.names = TRUE)
+  
+  
+  # this is a bit of a shit way to do this but currently i can't 
+  # think of anything else: 
+  
+  # there are 19 bio_variables
+  
+  bioclim_stack <- list(Bio_01 = list(),
+                        Bio_02 = list(),
+                        Bio_03 = list(),
+                        Bio_04 = list(),
+                        Bio_05 = list(),
+                        Bio_06 = list(),
+                        Bio_07 = list(),
+                        Bio_08 = list(),
+                        Bio_09 = list(),
+                        Bio_10 = list(),
+                        Bio_11 = list(),
+                        Bio_12 = list(),
+                        Bio_13 = list(),
+                        Bio_14 = list(),
+                        Bio_15 = list(),
+                        Bio_16 = list(),
+                        Bio_17 = list(),
+                        Bio_18 = list(),
+                        Bio_19 = list())
+  
+  # for loop to extract the years that correspond to our era
+  for(i in start:end) {
+    
+    # loop over each year in the bioclim directory
+    for(folder in bc_folders) {
+      
+      # check if the year in the bioclim directory is the same as the current 
+      # iteration
+      if (basename(folder) == as.character(i)){
+        
+        # list the files
+        bioclim_list <- list.files(folder,
+                                   full.names = TRUE)
+
+        
+        # now iterate over each bioclimatic variable and append them to their 
+        # respective key in the list.
+        
+        for (bioclim in bioclim_list) {
+       
+          
+          # not the prettiest way of doing it but we will put the biovars
+          # 1 by 1 into their respective spots in the dictionary. 
+          
+          if (grepl('bio1_', basename(bioclim))) { 
+            
+            bioclim_stack$Bio_01 <- c(bioclim_stack$Bio_01, bioclim)
+            
+          } else if (grepl('bio2_', basename(bioclim))){
+            
+            bioclim_stack$Bio_02 <- c(bioclim_stack$Bio_02, bioclim)
+            
+          } else if (grepl('bio3_', basename(bioclim))){
+            
+            bioclim_stack$Bio_03 <- c(bioclim_stack$Bio_03, bioclim)
+            
+          } else if (grepl('bio4_', basename(bioclim))){
+            
+            bioclim_stack$Bio_04 <- c(bioclim_stack$Bio_04, bioclim)
+            
+          } else if (grepl('bio5_', basename(bioclim))){
+            
+            bioclim_stack$Bio_05 <- c(bioclim_stack$Bio_05, bioclim)
+            
+          } else if (grepl('bio6_', basename(bioclim))){
+            
+            bioclim_stack$Bio_06 <- c(bioclim_stack$Bio_06, bioclim)
+            
+          } else if (grepl('bio7_', basename(bioclim))){
+            
+            bioclim_stack$Bio_07 <- c(bioclim_stack$Bio_07, bioclim)
+            
+          } else if (grepl('bio8_', basename(bioclim))){
+            
+            bioclim_stack$Bio_08 <- c(bioclim_stack$Bio_08, bioclim)
+            
+          } else if (grepl('bio9_', basename(bioclim))){
+            
+            bioclim_stack$Bio_09 <- c(bioclim_stack$Bio_09, bioclim)
+            
+          } else if (grepl('bio10_', basename(bioclim))){
+            
+            bioclim_stack$Bio_10 <- c(bioclim_stack$Bio_10, bioclim)
+            
+          } else if (grepl('bio11_', basename(bioclim))){
+            
+            bioclim_stack$Bio_11 <- c(bioclim_stack$Bio_11, bioclim)
+            
+          } else if (grepl('bio12_', basename(bioclim))){
+            
+            bioclim_stack$Bio_12 <- c(bioclim_stack$Bio_12, bioclim)
+            
+          } else if (grepl('bio13_', basename(bioclim))){
+            
+            bioclim_stack$Bio_13 <- c(bioclim_stack$Bio_13, bioclim)
+            
+          } else if (grepl('bio14_', basename(bioclim))){
+            
+            bioclim_stack$Bio_14 <- c(bioclim_stack$Bio_14, bioclim)
+            
+          } else if (grepl('bio15_', basename(bioclim))){
+            
+            bioclim_stack$Bio_15 <- c(bioclim_stack$Bio_15, bioclim)
+            
+          } else if (grepl('bio16_', basename(bioclim))){
+            
+            bioclim_stack$Bio_16 <- c(bioclim_stack$Bio_16, bioclim)
+            
+          } else if (grepl('bio17_', basename(bioclim))){
+            
+            bioclim_stack$Bio_17 <- c(bioclim_stack$Bio_17, bioclim)
+            
+          } else if (grepl('bio18_', basename(bioclim))){
+            
+            bioclim_stack$Bio_18 <- c(bioclim_stack$Bio_18, bioclim)
+            
+          } else if (grepl('bio19_', basename(bioclim))){
+            
+            bioclim_stack$Bio_19 <- c(bioclim_stack$Bio_19, bioclim)
+            
+            } # end of segregating bioclim data based on biovars
+          
+          } # end of looping over bioclim in bioclim list
+        
+        } # end of checking if the name of the folder is in the era
+      
+      } # end of iterating through each year in the bioclim list
+  
+    } # end of iterating though the start and end date
+  
+  # at this point, we should have a dictionary where each biovar is separated
+  # by their biovar id instead of by year.
+  # we can apply a raster stack function to each value in the 
+  # dictionary
+  bioclim_rast_stack <- lapply(bioclim_stack, raster::stack)
+  
+  # now we just need to average it over the years:
+  avg_bioclims <- lapply(bioclim_rast_stack, function(stack) {
+    calc(stack, fun = mean)
+    })
+  
+  # create a new directory to hold this:
+  averaged_output <- paste0(path, 
+                            "/Data/Intermediate/Averaged_data")
+  
+  if (!dir.exists(averaged_output)){
+    dir.create(averaged_output)
+  }
+  
+  print(averaged_output)
+  
+  avg_bioclim_output <- paste0(averaged_output,
+                               "/",
+                               "SSP",
+                               as.character(ssp_scenario),
+                               "/Bioclim_avg")
+  
+  
+  if (!dir.exists(avg_bioclim_output)){
+    dir.create(avg_bioclim_output, recursive = TRUE)
+  }
+  
+  print(avg_bioclim_output)
+  
+  
+  # loop over every key in the list and save the raster in the Bioclim average
+  # directory:
+  
+  for (key in names(avg_bioclims)){
+    
+    cat(paste0("\nSaving ", key , " averaged over years ", start, "-", end, "." ))
+    
+    # we will have separate directories for years because we will put both the future 
+    # and past data in here.
+    final_bioclim_output_path <- paste0(avg_bioclim_output, "/", key)
+    
+    if (!dir.exists(final_bioclim_output_path)){
+      dir.create(final_bioclim_output_path)
+    }
+    
+    # extract the raster from that iteration  
+    bioclim_avg_raster <- avg_bioclims[[key]]
+    
+    raster::writeRaster(bioclim_avg_raster,
+                        filename = paste0(final_bioclim_output_path, 
+                                          "/", 
+                                          key,
+                                          "_",
+                                          start, "-", end,
+                                          ".tif"),
+                        overwrite = TRUE)
+      }
+  
+  } # end of average_biovars function
+ 
+
+# 2. future SSP585
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 126)
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 245)
+average_biovars(start=2015,
+                end = 2060,
+                ssp_scenario = 585)
+# average_biovars(start = 2001, 
+#                 end = 2014, 
+#                 ssp_scenario = "historical")
+
+
+```
+
+```{r}
+path<- "/Users/yangyang/Documents/WildfireRebuttal"
+
+average_biovars <- function(start,
+                            end, 
+                            ssp_scenario){
+  
+  bc_dir <- paste0(path, "/Data/Intermediate/BioClim/historical")
+  
+    
+  bc_folders <- list.files(bc_dir, full.names = TRUE)
+  
+  
+  # this is a bit of a shit way to do this but currently i can't 
+  # think of anything else: 
+  
+  # there are 19 bio_variables
+  
+  bioclim_stack <- list(Bio_01 = list(),
+                        Bio_02 = list(),
+                        Bio_03 = list(),
+                        Bio_04 = list(),
+                        Bio_05 = list(),
+                        Bio_06 = list(),
+                        Bio_07 = list(),
+                        Bio_08 = list(),
+                        Bio_09 = list(),
+                        Bio_10 = list(),
+                        Bio_11 = list(),
+                        Bio_12 = list(),
+                        Bio_13 = list(),
+                        Bio_14 = list(),
+                        Bio_15 = list(),
+                        Bio_16 = list(),
+                        Bio_17 = list(),
+                        Bio_18 = list(),
+                        Bio_19 = list())
+  
+  # for loop to extract the years that correspond to our era
+  for(i in start:end) {
+    
+    # loop over each year in the bioclim directory
+    for(folder in bc_folders) {
+      
+      # check if the year in the bioclim directory is the same as the current 
+      # iteration
+      if (basename(folder) == as.character(i)){
+        
+        # list the files
+        bioclim_list <- list.files(folder,
+                                   full.names = TRUE)
+
+        
+        # now iterate over each bioclimatic variable and append them to their 
+        # respective key in the list.
+        
+        for (bioclim in bioclim_list) {
+       
+          
+          # not the prettiest way of doing it but we will put the biovars
+          # 1 by 1 into their respective spots in the dictionary. 
+          
+          if (grepl('bio1_', basename(bioclim))) { 
+            
+            bioclim_stack$Bio_01 <- c(bioclim_stack$Bio_01, bioclim)
+            
+          } else if (grepl('bio2_', basename(bioclim))){
+            
+            bioclim_stack$Bio_02 <- c(bioclim_stack$Bio_02, bioclim)
+            
+          } else if (grepl('bio3_', basename(bioclim))){
+            
+            bioclim_stack$Bio_03 <- c(bioclim_stack$Bio_03, bioclim)
+            
+          } else if (grepl('bio4_', basename(bioclim))){
+            
+            bioclim_stack$Bio_04 <- c(bioclim_stack$Bio_04, bioclim)
+            
+          } else if (grepl('bio5_', basename(bioclim))){
+            
+            bioclim_stack$Bio_05 <- c(bioclim_stack$Bio_05, bioclim)
+            
+          } else if (grepl('bio6_', basename(bioclim))){
+            
+            bioclim_stack$Bio_06 <- c(bioclim_stack$Bio_06, bioclim)
+            
+          } else if (grepl('bio7_', basename(bioclim))){
+            
+            bioclim_stack$Bio_07 <- c(bioclim_stack$Bio_07, bioclim)
+            
+          } else if (grepl('bio8_', basename(bioclim))){
+            
+            bioclim_stack$Bio_08 <- c(bioclim_stack$Bio_08, bioclim)
+            
+          } else if (grepl('bio9_', basename(bioclim))){
+            
+            bioclim_stack$Bio_09 <- c(bioclim_stack$Bio_09, bioclim)
+            
+          } else if (grepl('bio10_', basename(bioclim))){
+            
+            bioclim_stack$Bio_10 <- c(bioclim_stack$Bio_10, bioclim)
+            
+          } else if (grepl('bio11_', basename(bioclim))){
+            
+            bioclim_stack$Bio_11 <- c(bioclim_stack$Bio_11, bioclim)
+            
+          } else if (grepl('bio12_', basename(bioclim))){
+            
+            bioclim_stack$Bio_12 <- c(bioclim_stack$Bio_12, bioclim)
+            
+          } else if (grepl('bio13_', basename(bioclim))){
+            
+            bioclim_stack$Bio_13 <- c(bioclim_stack$Bio_13, bioclim)
+            
+          } else if (grepl('bio14_', basename(bioclim))){
+            
+            bioclim_stack$Bio_14 <- c(bioclim_stack$Bio_14, bioclim)
+            
+          } else if (grepl('bio15_', basename(bioclim))){
+            
+            bioclim_stack$Bio_15 <- c(bioclim_stack$Bio_15, bioclim)
+            
+          } else if (grepl('bio16_', basename(bioclim))){
+            
+            bioclim_stack$Bio_16 <- c(bioclim_stack$Bio_16, bioclim)
+            
+          } else if (grepl('bio17_', basename(bioclim))){
+            
+            bioclim_stack$Bio_17 <- c(bioclim_stack$Bio_17, bioclim)
+            
+          } else if (grepl('bio18_', basename(bioclim))){
+            
+            bioclim_stack$Bio_18 <- c(bioclim_stack$Bio_18, bioclim)
+            
+          } else if (grepl('bio19_', basename(bioclim))){
+            
+            bioclim_stack$Bio_19 <- c(bioclim_stack$Bio_19, bioclim)
+            
+            } # end of segregating bioclim data based on biovars
+          
+          } # end of looping over bioclim in bioclim list
+        
+        } # end of checking if the name of the folder is in the era
+      
+      } # end of iterating through each year in the bioclim list
+  
+    } # end of iterating though the start and end date
+  
+  # at this point, we should have a dictionary where each biovar is separated
+  # by their biovar id instead of by year.
+  # we can apply a raster stack function to each value in the 
+  # dictionary
+  bioclim_rast_stack <- lapply(bioclim_stack, raster::stack)
+  
+  # now we just need to average it over the years:
+  avg_bioclims <- lapply(bioclim_rast_stack, function(stack) {
+    calc(stack, fun = mean)
+    })
+  
+  # create a new directory to hold this:
+  averaged_output <- paste0(path, 
+                            "/Data/Intermediate/Averaged_data")
+  
+  if (!dir.exists(averaged_output)){
+    dir.create(averaged_output)
+  }
+  
+  print(averaged_output)
+  
+  avg_bioclim_output <- paste0(averaged_output,
+                               "/",
+                               "SSP",
+                               as.character(ssp_scenario),
+                               "/Bioclim_avg")
+  
+  
+  if (!dir.exists(avg_bioclim_output)){
+    dir.create(avg_bioclim_output, recursive = TRUE)
+  }
+  
+  print(avg_bioclim_output)
+  
+  
+  # loop over every key in the list and save the raster in the Bioclim average
+  # directory:
+  
+  for (key in names(avg_bioclims)){
+    
+    cat(paste0("\nSaving ", key , " averaged over years ", start, "-", end, "." ))
+    
+    # we will have separate directories for years because we will put both the future 
+    # and past data in here.
+    final_bioclim_output_path <- paste0(avg_bioclim_output, "/", key)
+    
+    if (!dir.exists(final_bioclim_output_path)){
+      dir.create(final_bioclim_output_path)
+    }
+    
+    # extract the raster from that iteration  
+    bioclim_avg_raster <- avg_bioclims[[key]]
+    
+    raster::writeRaster(bioclim_avg_raster,
+                        filename = paste0(final_bioclim_output_path, 
+                                          "/", 
+                                          key,
+                                          "_",
+                                          start, "-", end,
+                                          ".tif"),
+                        overwrite = TRUE)
+      }
+  
+  } # end of average_biovars function
+ 
+
+# 2. future SSP585
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 126)
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 245)
+# average_biovars(start=2015,
+#                 end = 2060,
+#                 ssp_scenario = 585)
+average_biovars(start = 2001,
+                end = 2014,
+                ssp_scenario = "historical")
+
+
+```
+```
+
+```{r}
+path <- "/Users/yangyang/Documents/WildfireRebuttal"
+
+average_biovars <- function(ssp_scenario,
+                            start = NULL,
+                            end   = NULL) {
+  # -------- 0. scenario → folder & default years ----------------------------
+  ssp_scenario <- tolower(as.character(ssp_scenario))
+  
+  if (ssp_scenario %in% c("historical", "hist")) {
+    bc_dir  <- file.path(path, "Data/Intermediate/BioClim", "historical")
+    if (is.null(start) || is.null(end)) { start <- 2001; end <- 2014 }
+  } else {
+    # keep only digits, e.g. "126" from "ssp126"
+    ssp_digits <- gsub("\\D", "", ssp_scenario)
+    bc_dir <- file.path(path, "Data/Intermediate/BioClim",
+                        paste0("SSP", ssp_digits))
+    if (is.null(start) || is.null(end)) { start <- 2015; end <- 2060 }
+  }
+  
+  if (!dir.exists(bc_dir)) {
+    stop("Bioclim directory not found: ", bc_dir)
+  }
+  cat("\n== Scenario:", ssp_scenario,
+      "| Years:", start, "-", end,
+      "| Source dir:", bc_dir, "\n")
+  
+  # -------- 1. scan bioclim folders -----------------------------------------
+  bc_folders <- list.dirs(bc_dir, full.names = TRUE, recursive = FALSE)
+  
+  # 19 biovars bucket
+  bioclim_stack <- setNames(vector("list", 19),
+                            sprintf("Bio_%02d", 1:19))
+  
+  # -------- 2. harvest rasters by year --------------------------------------
+  for (yr in start:end) {
+    yr_folder <- file.path(bc_dir, yr)
+    if (!dir.exists(yr_folder)) {
+      cat("  >> Missing year folder", yr, "- skipped\n")
+      next
+    }
+    files <- list.files(yr_folder, full.names = TRUE)
+    for (f in files) {
+      idx <- as.integer(sub("bio([0-9]+)_.*", "\\1", basename(f)))
+      if (!is.na(idx) && idx >= 1 && idx <= 19) {
+        bioclim_stack[[idx]] <- c(bioclim_stack[[idx]], f)
+      }
+    }
+  }
+  
+  # -------- 3. average each biovar -----------------------------------------
+  bioclim_rast_stack <- lapply(bioclim_stack, raster::stack)
+  avg_bioclims <- lapply(bioclim_rast_stack, \(stk) calc(stk, mean))
+  
+  # -------- 4. write out ----------------------------------------------------
+  out_base <- file.path(path, "Data/Intermediate/Averaged_data",
+                        ifelse(ssp_scenario %in% c("historical","hist"),
+                               "historical",
+                               paste0("SSP", gsub("\\D","", ssp_scenario))),
+                        "Bioclim_avg")
+  dir.create(out_base, recursive = TRUE, showWarnings = FALSE)
+  
+  for (i in seq_along(avg_bioclims)) {
+    bio_name <- names(avg_bioclims)[i]          # e.g. "Bio_01"
+    out_dir  <- file.path(out_base, bio_name)
+    dir.create(out_dir, showWarnings = FALSE)
+    
+    out_file <- file.path(out_dir,
+                 sprintf("%s_%d-%d.tif", tolower(bio_name), start, end))
+    
+    raster::writeRaster(avg_bioclims[[i]], out_file, overwrite = TRUE)
+    cat("  >> wrote", basename(out_file), "\n")
+  }
+  cat("== DONE:", ssp_scenario, "\n")
+}
+
+# ---------------------------------------------------------------------------
+# Run for all four scenarios -------------------------------------------------
+scenarios <- c("historical", "ssp126", "ssp245", "ssp585")
+
+# for (sc in scenarios) {
+#   average_biovars(ssp_scenario = sc)
+# }
+average_biovars("historical", start = 2001, end = 2014)
+average_biovars("ssp126", start = 2015, end = 2060)
+average_biovars("ssp245", start = 2015, end = 2060)
+average_biovars("ssp585", start = 2015, end = 2060)
+```
+

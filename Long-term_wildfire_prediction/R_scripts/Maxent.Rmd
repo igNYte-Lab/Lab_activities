@@ -1,0 +1,1605 @@
+---
+title: "Maxent212"
+output: html_document
+date: "2025-02-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+gc()
+
+```
+
+```{r}
+library(raster)
+library(dismo)
+# library(rgeos)
+library(rstudioapi) # automatically get the directory
+library(dplyr)
+library(sf)
+library(tmap)
+```
+```{r}
+run_maxent <- function(SSP_scenario) {
+  path <- dirname(getActiveDocumentContext()$path)
+  #print(path)
+  setwd(path)
+  historical_bioclim_path <- list.files(("/Users/yangyang/Documents/WildfireRebuttal/Data/Final/Averaged_data/historical"),
+                               full.names = TRUE)
+  future_bioclim_path <- list.files(paste0("/Users/yangyang/Documents/WildfireRebuttal/Data/Final/Bioclim_avg/SSP", SSP_scenario),
+                                    full.names = TRUE)
+  #print(future_bioclim_path)
+  present_bioclim_list <- list()
+  future_bioclim_list <- list()
+
+  for (folder in historical_bioclim_path){
+        
+      Bioclim_file_loc <- list.files(folder, full.names = TRUE)
+      # print(Bioclim_file_loc)
+      # loop through each folder in the parent directory.
+      for (file in Bioclim_file_loc) {
+          
+        # look for the file which contains present climatic variables.
+        # this is represented by the era
+        if (grepl("2001-2014", basename(file))) {
+           # store the file path of this 
+          present_bioclim_list <- append(present_bioclim_list, file)
+          # print(present_bioclim_list)  
+          }
+      }
+  } # end of historical data looper
+
+  for (folder_future in future_bioclim_path) {
+
+      future_bioclim_file_loc <- list.files(folder_future, 
+                                            full.names = TRUE)
+      
+      # loop through each folder in the parent directory.
+      for (file_fut in future_bioclim_file_loc) {
+        
+        #print(file_fut)
+        # look for the file which contains the target future climate variables
+        # and store that in the futre_bioclim_list
+      
+        if (grepl("2015-2060", basename(file_fut))) {
+            
+          future_bioclim_list <- append(future_bioclim_list, file_fut)
+          # print(raster(file_fut))
+          }
+        }
+  } # end of future list looper
+
+  topography <- list.files("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Topography/Topo_processed",
+                             full.names = TRUE)
+  for (file in topography){
+    print(raster(file))
+  }
+  # import the river proximity map:
+  rivers <- list.files("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/rivers/portugal_proximity_river_map",
+                         full.names = TRUE)
+  print(raster(rivers))
+  ref_raster <- raster(rivers[1])  
+
+  #deal with present bioclim_list
+  bioclim_resampled <- lapply(present_bioclim_list, function(file) {
+    raster_file <- raster(file) 
+    if (!compareCRS(raster_file, ref_raster)) {
+      raster_file <- projectRaster(raster_file, crs = crs(ref_raster))
+    }
+
+    resample(raster_file, ref_raster, method = "bilinear")  
+  })
+
+  # lapply(bioclim_resampled, function(r) res(r))
+  bioclim_stack <- raster::stack(c(bioclim_resampled, topography, rivers))
+  print(res(bioclim_stack))
+  # print(extent(bioclim_stack))
+  plot(bioclim_stack[[1]]) 
+  ref_raster <- raster(rivers[1])
+  print(res(ref_raster)) 
+  names(bioclim_stack) <- sub("_2001.2014", "", names(bioclim_stack))
+  print(names(bioclim_stack))
+  portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+  portugal <- st_read(portugal_path, layer = "portugal_20790")
+  print(portugal)
+  st_crs(portugal)
+  data_dir <- paste0(dirname(path), "/WildfireCodeYY/Data")
+  print(data_dir)
+  occ_raw <- read.csv("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Vegetation/NFI_2015.csv", header = TRUE)
+  tree_species <- list("Quercus suber", "Quercus rotundifolia" ,
+                         "Castanea sativa", "Eucalyptus",
+                         "Acacia", "Pinus pinaster", "Pinus pinea")
+  output_directory_main <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Final/maxent_outputs"
+  print(output_directory_main)
+  if (!dir.exists(output_directory_main)){
+
+      dir.create(output_directory_main, recursive = TRUE)
+
+  }
+  output_directory <- paste0(output_directory_main, "/SSP", as.character(SSP_scenario))
+    
+  if (!dir.exists(output_directory)){
+      
+      dir.create(output_directory)
+  }
+
+  for (tree in tree_species) {
+      species <- occ_raw %>% filter(verbatimScientificName == tree)
+      # print(species)
+      # remove erroneous coordinates, where either the latitude or
+      # longitude is missing
+      any(is.na(species))
+      species_clean <- subset(species, 
+                                (!is.na(decimalLatitude)) & 
+                                (!is.na(decimalLongitude)))
+      
+      cat(nrow(species) - nrow(species_clean), "records are removed")
+      # remove duplicated data based on latitude and longitude
+      dups <- duplicated(species_clean[c("decimalLatitude", "decimalLongitude")])
+      species_unique <- species_clean[!dups, ]
+      cat(nrow(species_clean) - nrow(species_unique), "records are removed")
+      # make occ spatial
+      coordinates(species_unique) <- ~decimalLongitude + decimalLatitude
+      # give it a crs -> all GBIF data comes in WGS84. This code is updated in the newest GDAL package
+      proj4string(species_unique) <- CRS("EPSG:4326")
+      # now, convert SpatialPointsDataFrame to sf object
+      species_unique <- st_as_sf(species_unique)
+      # convert species_unique to the desired crs (in this case, portugal)
+      species_unique <- st_transform(species_unique, st_crs(portugal))
+      # now that the points are in the portugese crs, we put it back as 
+      # a spatial point dataframe.
+      species_unique <- as(species_unique, "Spatial")
+      # lets check if it worked.
+      # lets just use the first raster (bioclim 01) to verify.
+      plot(bioclim_stack[[1]]) 
+      plot(species_unique, add = TRUE, col = 'blue')
+      # good, they line up really well!
+        
+      # thin the data: we only want 1 point per raster cell.
+      # this is because having multiple points per raster cell can introduce sampling
+      # bias.
+        
+      # thin occurrence data (keep one occurrence point per cell)
+      cells <- cellFromXY(bioclim_stack[[1]], species_unique)
+      cell_dup <- duplicated(cells)
+      species_final <- species_unique[!cell_dup, ]
+      cat(nrow(species_unique) - nrow(species_final), "records are removed")
+      
+      tmap_mode('view')
+      test <- st_as_sf(species_final)
+      tm_shape(test)+
+          tm_dots(col= "scientificName")
+      
+      # no need to create a buffer for the study area because Portugal is quite small.
+        
+      # create a directory to hold data for further processing.
+      int_process_data <- paste0(path,"/int_process_data")
+      if (dir.exists(int_process_data)){
+          # do nothing
+        }else{
+          # create the directory
+          dir.create(int_process_data)
+        }
+      
+      # to ensure that the random bg points never coincide with the presence data, 
+      # we will generate a raster that takes this into account.
+      # this is made possible by giving raster cells where the species is located
+      # a value of 'NA' and then making sure that the NA value cells are ignored
+      # during the random sampling process when generating the background
+      # (pseudo-absence) points.
+        
+      # we do this because we have 1 species point per pixel, and where a species is
+      # present, it cannot also be absent.
+        
+      # create raster from occurrence points, assign them a unique value, like 1
+      species_raster <- rasterize(species_final, bioclim_stack, field=1)
+      
+      AOI_no_species <- overlay(bioclim_stack, 
+                                  species_raster, 
+                                  fun = function(bioclim_stack, species_raster) 
+                                  {ifelse(is.na(species_raster), bioclim_stack, NA)})
+      # save the bioclim_stack for processing later in ascii format.
+      writeRaster(bioclim_stack,
+                    # a series of names for output files
+                    filename=paste0(int_process_data, "/", names(bioclim_stack),".asc"), 
+                    format="ascii", ## the output format
+                    bylayer=TRUE, ## this will save a series of layers
+                    overwrite=TRUE)
+      # select random background points from the study region.
+      # these random points are going to be the 'pseudo-absence' data points:
+      
+      # set the seed so that its reproducible:
+      set.seed(7) 
+      
+      # lets have the same number of presence data to pseudo absence data.
+      # for the purpose of a balanced dataset.
+      # sample the pseudo-absence data from the raster image which shows NA
+      # where the species is present. 
+        
+      bg <- sampleRandom(x=AOI_no_species,
+                          size= (nrow(species_final) * 2), # 2 *size of pseudo-absence points.
+                          na.rm=T, #removes the 'Not Applicable' points  
+                          sp=T) # return spatial points
+      
+      
+      plot(AOI_no_species[[1]])
+      # add the background points to the plotted raster
+      plot(bg,add=T) 
+      # add the occurrence data to the plotted raster
+      plot(species_final,add=T,col="red")
+      
+      ### TRAIN-TEST SPLIT ###
+        
+      # get the same random sample for training and testing
+      set.seed(7)
+      
+      # we will go for a 70-30 train-test split
+      # randomly select 70% for training
+      selected <- sample(1:nrow(species_final), nrow(species_final) * 0.7)
+      
+      
+      train <- species_final[selected, ] # data selected for training
+      test <- species_final[-selected, ] # the opposite of selected data for testing  
+      
+      # converting the data into a dataframe format for processing in maxent:
+        
+      # extracting env conditions for training occ from the raster
+      # stack: a data frame is returned (i.e multiple columns)
+      p_train <- extract(bioclim_stack, train)
+      # env conditions for testing occ
+      p_test <- extract(bioclim_stack, test)
+      # extracting env conditions for background points.
+      a <- extract(bioclim_stack, bg)
+      
+      # now we are going to assign the value '1' to species occurrence (presence) points
+      # and '0' to the background (pseudo-absence) points.
+        
+      # generating a new vector where 1 = presence and 0 = pseudo-absence.
+      pa <- c(rep(1, nrow(p_train)), rep(0, nrow(a)))
+        
+      pder <- as.data.frame(rbind(p_train, a))
+      
+      # training MaxEnt.
+        
+      # create a directory to hold the outputs.
+      # Name the directory after the tree species inside the maxent_output
+      mxent_output <- paste0(output_directory, "/", tree) 
+        
+      if (dir.exists(mxent_output)){
+        # do nothing
+      }else{
+        # create the directory
+        dir.create(mxent_output )
+      }
+        
+      mod <- maxent(x=pder, ## env conditions
+                    p=pa,   ## 1:presence or 0:absence
+                    path=mxent_output, ## folder for maxent output;
+                    args=c("responsecurves","writebackgroundpredictions") ## parameter specification
+      )
+        
+      mod
+        
+      # view results:
+        
+      # view detailed results
+      results <- mod@results
+        
+      # print the results onto a text file in the output folder.
+        
+      {
+        sink(paste0(mxent_output, '/results.txt'))
+        print(results)
+        sink()
+        
+      }
+      # example 1, project to study area [raster]
+      pred <- predict(mod, bioclim_stack)
+      plot(pred, main = paste0("prediction probabilities (present) - ", tree), zlim = c(0, 1))  # plot the continuous prediction
+        
+      # lets save the raster output just in case:
+      writeRaster(pred,
+                  filename = paste0(mxent_output, "/present_PP_", tree, ".tif"),
+                  format="GTIFF",
+                  overwrite = TRUE)
+      
+      # project with training occurrences [dataframes]
+      pred2 <- predict(mod, p_train)
+      
+      # histogram of the prediction.
+      hist(pred2, main = paste0("Histogram -  ", tree))
+      
+      # model evaluation on training data:
+        
+      mod_eval_train <- dismo::evaluate(p = p_train, a = a, model = mod)
+      print(mod_eval_train)  
+      
+      # model_evaulation on testing data:
+        
+      mod_eval_test <- dismo::evaluate(p = p_test, a = a, model = mod)
+      print(mod_eval_test)
+      
+      # print the evaualtion onto a text file in the output folder.
+        
+      {
+        sink(paste0(mxent_output, '/evaluations.txt'))
+        cat(paste0("Model Evaluation for train set\n\nTree Species = ", tree, "\n\n"))
+        print(mod_eval_train)
+        cat("\n\nModel Evaluation for test set\n\n")
+        print(mod_eval_test)
+        sink()
+      }
+      
+      # Now we convert our probabilities into binary values based on a treshold:
+        
+      # calculate thresholds of models
+        
+      # The tresholds are all calculated using the training data 
+      # They are then applied to the testing data.
+        
+        
+      # 0% omission rate 
+      thd1 <- threshold(mod_eval_train, "no_omission")  
+        
+      # highest TSS
+      thd2 <- threshold(mod_eval_train, "spec_sens")
+        
+      # 50 percent omission:
+      thd3 <- threshold(mod_eval_train, stat="sensitivity", sensitivity = 0.5)
+        
+        
+      # plotting points that are above the previously calculated
+      # thresholded value
+      species_dist <- pred >= thd2
+        
+      plot(species_dist, main = paste0("Binary prediction (present) - ", tree), zlim = c(0, 1))
+        
+      writeRaster(species_dist,
+                  filename = paste0(mxent_output, "/present_TSS_", tree, ".tif"),
+                  format="GTIFF",
+                  overwrite = TRUE)
+      
+      # Future Projections
+      future_bioclim_resampled <- lapply(future_bioclim_list, function(file) {
+        raster_file <- raster(file)
+        if (!compareCRS(raster_file, ref_raster)) {
+          raster_file <- projectRaster(raster_file, crs = crs(ref_raster))
+        }
+        resample(raster_file, ref_raster, method = "bilinear")
+      })
+      future_clim_stack <- raster::stack(c(future_bioclim_resampled, topography, rivers))
+      names(future_clim_stack) <- sub("_2015.2060", "", names(future_clim_stack))
+      
+      pred2 <- predict(mod, future_clim_stack)
+      plot(pred2, main = paste0("Prediction Probabilities (future) - ", tree), zlim = c(0, 1))
+      writeRaster(pred2, filename = paste0(mxent_output, "/future_PP_", tree, ".tif"), format = "GTIFF", overwrite = TRUE)
+
+      future_species_dist <- pred2 >= thd2
+      plot(future_species_dist, main = paste0("Binarized (future) - ", tree), zlim = c(0, 1))
+      writeRaster(future_species_dist, filename = paste0(mxent_output, "/future_TSS_", tree, ".tif"), format = "GTIFF", overwrite = TRUE)
+  }
+}
+
+
+run_maxent(126)
+# cat("\n===================\n")
+# cat("Completed MaxEnt run for SSP 245. Starting run for SSP 585...\n")
+# cat("===================\n\n")
+# run_maxent(585)
+```
+```
+
+```{r}
+run_maxent <- function(SSP_scenario) {
+  path <- dirname(getActiveDocumentContext()$path)
+  #print(path)
+  setwd(path)
+  historical_bioclim_path <- list.files(("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Bioclim_avg/SSP245"),
+                               full.names = TRUE)
+  future_bioclim_path <- list.files(paste0("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Bioclim_avg/SSP", SSP_scenario),
+                                    full.names = TRUE)
+  #print(future_bioclim_path)
+  present_bioclim_list <- list()
+  future_bioclim_list <- list()
+
+  for (folder in historical_bioclim_path){
+        
+      Bioclim_file_loc <- list.files(folder, full.names = TRUE)
+      # print(Bioclim_file_loc)
+      # loop through each folder in the parent directory.
+      for (file in Bioclim_file_loc) {
+          
+        # look for the file which contains present climatic variables.
+        # this is represented by the era
+        if (grepl("2001-2014", basename(file))) {
+           # store the file path of this 
+          present_bioclim_list <- append(present_bioclim_list, file)
+          # print(present_bioclim_list)  
+          }
+      }
+  } # end of historical data looper
+
+  for (folder_future in future_bioclim_path) {
+
+      future_bioclim_file_loc <- list.files(folder_future, 
+                                            full.names = TRUE)
+      
+      # loop through each folder in the parent directory.
+      for (file_fut in future_bioclim_file_loc) {
+        
+        #print(file_fut)
+        # look for the file which contains the target future climate variables
+        # and store that in the futre_bioclim_list
+      
+        if (grepl("2015-2060", basename(file_fut))) {
+            
+          future_bioclim_list <- append(future_bioclim_list, file_fut)
+          # print(raster(file_fut))
+          }
+        }
+  } # end of future list looper
+
+  topography <- list.files("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Topography/Topo_processed",
+                             full.names = TRUE)
+  for (file in topography){
+    print(raster(file))
+  }
+  # import the river proximity map:
+  rivers <- list.files("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/rivers/portugal_proximity_river_map",
+                         full.names = TRUE)
+  print(raster(rivers))
+  ref_raster <- raster(rivers[1])  
+
+  #deal with present bioclim_list
+  bioclim_resampled <- lapply(present_bioclim_list, function(file) {
+    raster_file <- raster(file) 
+    if (!compareCRS(raster_file, ref_raster)) {
+      raster_file <- projectRaster(raster_file, crs = crs(ref_raster))
+    }
+
+    resample(raster_file, ref_raster, method = "bilinear")  
+  })
+
+  # lapply(bioclim_resampled, function(r) res(r))
+  bioclim_stack <- raster::stack(c(bioclim_resampled, topography, rivers))
+  fill_na_bilinear <- function(r) {
+    # Replace NA with the mean of the 8 surrounding cells
+    focal(r, w = matrix(1, 3, 3), fun = function(x, ...) mean(x, na.rm = TRUE), NAonly = TRUE, pad = TRUE)
+  }
+
+  bioclim_stack <- stack(lapply(1:nlayers(bioclim_stack), function(i) {
+    fill_na_bilinear(bioclim_stack[[i]])
+  }))
+  print(res(bioclim_stack))
+  # print(extent(bioclim_stack))
+  plot(bioclim_stack[[1]]) 
+  ref_raster <- raster(rivers[1])
+  print(res(ref_raster)) 
+  names(bioclim_stack) <- sub("_2001.2014", "", names(bioclim_stack))
+  print(names(bioclim_stack))
+  portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+  portugal <- st_read(portugal_path, layer = "portugal_20790")
+  print(portugal)
+  st_crs(portugal)
+  data_dir <- paste0(dirname(path), "/WildfireCodeYY/Data")
+  print(data_dir)
+  occ_raw <- read.csv("/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Vegetation/NFI_2015.csv", header = TRUE)
+  tree_species <- list("Quercus suber", "Quercus rotundifolia" ,
+                         "Castanea sativa", "Eucalyptus",
+                         "Acacia", "Pinus pinaster", "Pinus pinea")
+  output_directory_main <- ("/Users/yangyang/Documents/WildfireRebuttal/Data/Final/maxent_outputs")
+  print(output_directory_main)
+  if (!dir.exists(output_directory_main)){
+
+      dir.create(output_directory_main, recursive = TRUE)
+
+  }
+  output_directory <- paste0(output_directory_main, "/SSP", as.character(SSP_scenario))
+    
+  if (!dir.exists(output_directory)){
+      
+      dir.create(output_directory)
+  }
+
+  for (tree in tree_species) {
+      species <- occ_raw %>% filter(verbatimScientificName == tree)
+      # print(species)
+      # remove erroneous coordinates, where either the latitude or
+      # longitude is missing
+      any(is.na(species))
+      species_clean <- subset(species, 
+                                (!is.na(decimalLatitude)) & 
+                                (!is.na(decimalLongitude)))
+      
+      cat(nrow(species) - nrow(species_clean), "records are removed")
+      # remove duplicated data based on latitude and longitude
+      dups <- duplicated(species_clean[c("decimalLatitude", "decimalLongitude")])
+      species_unique <- species_clean[!dups, ]
+      cat(nrow(species_clean) - nrow(species_unique), "records are removed")
+      # make occ spatial
+      coordinates(species_unique) <- ~decimalLongitude + decimalLatitude
+      # give it a crs -> all GBIF data comes in WGS84. This code is updated in the newest GDAL package
+      proj4string(species_unique) <- CRS("EPSG:4326")
+      # now, convert SpatialPointsDataFrame to sf object
+      species_unique <- st_as_sf(species_unique)
+      # convert species_unique to the desired crs (in this case, portugal)
+      species_unique <- st_transform(species_unique, st_crs(portugal))
+      # now that the points are in the portugese crs, we put it back as 
+      # a spatial point dataframe.
+      species_unique <- as(species_unique, "Spatial")
+      # lets check if it worked.
+      # lets just use the first raster (bioclim 01) to verify.
+      plot(bioclim_stack[[1]]) 
+      plot(species_unique, add = TRUE, col = 'blue')
+      # good, they line up really well!
+        
+      # thin the data: we only want 1 point per raster cell.
+      # this is because having multiple points per raster cell can introduce sampling
+      # bias.
+        
+      # thin occurrence data (keep one occurrence point per cell)
+      cells <- cellFromXY(bioclim_stack[[1]], species_unique)
+      cell_dup <- duplicated(cells)
+      species_final <- species_unique[!cell_dup, ]
+      cat(nrow(species_unique) - nrow(species_final), "records are removed")
+      
+      tmap_mode('view')
+      test <- st_as_sf(species_final)
+      tm_shape(test)+
+          tm_dots(col= "scientificName")
+      
+      # no need to create a buffer for the study area because Portugal is quite small.
+        
+      # create a directory to hold data for further processing.
+      int_process_data <- paste0(path,"/int_process_data")
+      if (dir.exists(int_process_data)){
+          # do nothing
+        }else{
+          # create the directory
+          dir.create(int_process_data)
+        }
+      
+      # to ensure that the random bg points never coincide with the presence data, 
+      # we will generate a raster that takes this into account.
+      # this is made possible by giving raster cells where the species is located
+      # a value of 'NA' and then making sure that the NA value cells are ignored
+      # during the random sampling process when generating the background
+      # (pseudo-absence) points.
+        
+      # we do this because we have 1 species point per pixel, and where a species is
+      # present, it cannot also be absent.
+        
+      # create raster from occurrence points, assign them a unique value, like 1
+      species_raster <- rasterize(species_final, bioclim_stack, field=1)
+      
+      AOI_no_species <- overlay(bioclim_stack, 
+                                  species_raster, 
+                                  fun = function(bioclim_stack, species_raster) 
+                                  {ifelse(is.na(species_raster), bioclim_stack, NA)})
+      # save the bioclim_stack for processing later in ascii format.
+      writeRaster(bioclim_stack,
+                    # a series of names for output files
+                    filename=paste0(int_process_data, "/", names(bioclim_stack),".asc"), 
+                    format="ascii", ## the output format
+                    bylayer=TRUE, ## this will save a series of layers
+                    overwrite=TRUE)
+      # select random background points from the study region.
+      # these random points are going to be the 'pseudo-absence' data points:
+      
+      # set the seed so that its reproducible:
+      set.seed(7) 
+      
+      # lets have the same number of presence data to pseudo absence data.
+      # for the purpose of a balanced dataset.
+      # sample the pseudo-absence data from the raster image which shows NA
+      # where the species is present. 
+        
+      bg <- sampleRandom(x=AOI_no_species,
+                          size= (nrow(species_final) * 2), # 2 *size of pseudo-absence points.
+                          na.rm=T, #removes the 'Not Applicable' points  
+                          sp=T) # return spatial points
+      
+      
+      plot(AOI_no_species[[1]])
+      # add the background points to the plotted raster
+      plot(bg,add=T) 
+      # add the occurrence data to the plotted raster
+      plot(species_final,add=T,col="red")
+      
+      ### TRAIN-TEST SPLIT ###
+        
+      # get the same random sample for training and testing
+      set.seed(7)
+      
+      # we will go for a 70-30 train-test split
+      # randomly select 70% for training
+      selected <- sample(1:nrow(species_final), nrow(species_final) * 0.7)
+      
+      
+      train <- species_final[selected, ] # data selected for training
+      test <- species_final[-selected, ] # the opposite of selected data for testing  
+      
+      # converting the data into a dataframe format for processing in maxent:
+        
+      # extracting env conditions for training occ from the raster
+      # stack: a data frame is returned (i.e multiple columns)
+      p_train <- extract(bioclim_stack, train)
+      # env conditions for testing occ
+      p_test <- extract(bioclim_stack, test)
+      # extracting env conditions for background points.
+      a <- extract(bioclim_stack, bg)
+      
+      # now we are going to assign the value '1' to species occurrence (presence) points
+      # and '0' to the background (pseudo-absence) points.
+        
+      # generating a new vector where 1 = presence and 0 = pseudo-absence.
+      pa <- c(rep(1, nrow(p_train)), rep(0, nrow(a)))
+        
+      pder <- as.data.frame(rbind(p_train, a))
+      
+      # training MaxEnt.
+        
+      # create a directory to hold the outputs.
+      # Name the directory after the tree species inside the maxent_output
+      mxent_output <- paste0(output_directory, "/", tree) 
+        
+      if (dir.exists(mxent_output)){
+        # do nothing
+      }else{
+        # create the directory
+        dir.create(mxent_output )
+      }
+        
+      mod <- maxent(x=pder, ## env conditions
+                    p=pa,   ## 1:presence or 0:absence
+                    path=mxent_output, ## folder for maxent output;
+                    args=c("responsecurves","writebackgroundpredictions") ## parameter specification
+      )
+        
+      mod
+        
+      # view results:
+        
+      # view detailed results
+      results <- mod@results
+        
+      # print the results onto a text file in the output folder.
+        
+      {
+        sink(paste0(mxent_output, '/results.txt'))
+        print(results)
+        sink()
+        
+      }
+      # example 1, project to study area [raster]
+      pred <- predict(mod, bioclim_stack)
+      plot(pred, main = paste0("prediction probabilities (present) - ", tree), zlim = c(0, 1))  # plot the continuous prediction
+        
+      # lets save the raster output just in case:
+      writeRaster(pred,
+                  filename = paste0(mxent_output, "/present_PP_", tree, ".tif"),
+                  format="GTIFF",
+                  overwrite = TRUE)
+      
+      # project with training occurrences [dataframes]
+      pred2 <- predict(mod, p_train)
+      
+      # histogram of the prediction.
+      hist(pred2, main = paste0("Histogram -  ", tree))
+      
+      # model evaluation on training data:
+        
+      mod_eval_train <- dismo::evaluate(p = p_train, a = a, model = mod)
+      print(mod_eval_train)  
+      
+      # model_evaulation on testing data:
+        
+      mod_eval_test <- dismo::evaluate(p = p_test, a = a, model = mod)
+      print(mod_eval_test)
+      
+      # print the evaualtion onto a text file in the output folder.
+        
+      {
+        sink(paste0(mxent_output, '/evaluations.txt'))
+        cat(paste0("Model Evaluation for train set\n\nTree Species = ", tree, "\n\n"))
+        print(mod_eval_train)
+        cat("\n\nModel Evaluation for test set\n\n")
+        print(mod_eval_test)
+        sink()
+      }
+      
+      # Now we convert our probabilities into binary values based on a treshold:
+        
+      # calculate thresholds of models
+        
+      # The tresholds are all calculated using the training data 
+      # They are then applied to the testing data.
+        
+        
+      # 0% omission rate 
+      thd1 <- threshold(mod_eval_train, "no_omission")  
+        
+      # highest TSS
+      thd2 <- threshold(mod_eval_train, "spec_sens")
+        
+      # 50 percent omission:
+      thd3 <- threshold(mod_eval_train, stat="sensitivity", sensitivity = 0.5)
+        
+        
+      # plotting points that are above the previously calculated
+      # thresholded value
+      species_dist <- pred >= thd2
+        
+      plot(species_dist, main = paste0("Binary prediction (present) - ", tree), zlim = c(0, 1))
+        
+      writeRaster(species_dist,
+                  filename = paste0(mxent_output, "/present_TSS_", tree, ".tif"),
+                  format="GTIFF",
+                  overwrite = TRUE)
+      
+      # Future Projections
+      future_bioclim_resampled <- lapply(future_bioclim_list, function(file) {
+        raster_file <- raster(file)
+        if (!compareCRS(raster_file, ref_raster)) {
+          raster_file <- projectRaster(raster_file, crs = crs(ref_raster))
+        }
+        resample(raster_file, ref_raster, method = "bilinear")
+      })
+      future_clim_stack <- raster::stack(c(future_bioclim_resampled, topography, rivers))
+      names(future_clim_stack) <- sub("_2015.2060", "", names(future_clim_stack))
+      
+      pred2 <- predict(mod, future_clim_stack)
+      plot(pred2, main = paste0("Prediction Probabilities (future) - ", tree), zlim = c(0, 1))
+      writeRaster(pred2, filename = paste0(mxent_output, "/future_PP_", tree, ".tif"), format = "GTIFF", overwrite = TRUE)
+
+      future_species_dist <- pred2 >= thd2
+      plot(future_species_dist, main = paste0("Binarized (future) - ", tree), zlim = c(0, 1))
+      writeRaster(future_species_dist, filename = paste0(mxent_output, "/future_TSS_", tree, ".tif"), format = "GTIFF", overwrite = TRUE)
+  }
+}
+
+
+run_maxent(126)
+# cat("\n===================\n")
+# cat("Completed MaxEnt run for SSP 245. Starting run for SSP 585...\n")
+# cat("===================\n\n")
+# run_maxent(585)
+```
+
+```{r}
+run_maxent <- function(SSP_scenario) {
+  suppressPackageStartupMessages({
+    library(raster)
+    library(sf)
+    library(sp)
+    library(dplyr)
+    library(dismo)
+  })
+  
+  ## ---- 0  路径 -------------------------------------------------------------
+  bioclim_root <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Final/Averaged_data"
+  topo_root    <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Topography/Topo_processed"
+  river_root   <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/rivers/portugal_proximity_river_map"
+  shp_portugal <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+  ref_path0    <- "/Users/yangyang/Documents/WildfireCodeYY/Data/R_output_data/Rasters/Portugal_ref_raster.tif"
+  out_root     <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Final/maxent_outputs"
+  
+  dir.create(out_root, recursive = TRUE, showWarnings = FALSE)
+  ssp_out <- file.path(out_root, paste0("SSP", SSP_scenario))
+  dir.create(ssp_out, showWarnings = FALSE)
+  
+  ## ---- 1  文件列表 ---------------------------------------------------------
+  patt_r <- "\\.(tif(f)?|asc)$"      # 只读栅格
+  hist_dirs <- list.files(file.path(bioclim_root, "historical"), full.names = TRUE)
+  fut_dirs  <- list.files(file.path(bioclim_root, paste0("SSP", SSP_scenario)),
+                          full.names = TRUE)
+  pick_files <- function(folders, pattern) {
+    unlist(lapply(folders, function(fd)
+      list.files(fd, pattern = pattern, full.names = TRUE)))
+  }
+  pres_bioclim <- pick_files(hist_dirs, "2001-2014")
+  fut_bioclim  <- pick_files(fut_dirs , "2015-2060")
+  topography   <- list.files(topo_root , pattern = patt_r, full.names = TRUE)
+  rivers       <- list.files(river_root, pattern = patt_r, full.names = TRUE)
+  
+  ## ---- 2  参考栅格 + 模板 ---------------------------------------------------
+  ref_raster <- raster(ref_path0)
+  if (!compareCRS(ref_raster, CRS("+init=EPSG:20790")))
+    ref_raster <- projectRaster(ref_raster, crs = CRS("+init=EPSG:20790"))
+  
+  # 用葡萄牙边界 bbox 造完整模板
+  portugal <- st_read(shp_portugal, quiet = TRUE)
+  bbox     <- st_bbox(portugal)
+  tpl <- raster(
+    xmn = bbox["xmin"], xmx = bbox["xmax"],
+    ymn = bbox["ymin"], ymx = bbox["ymax"],
+    resolution = c(xres(ref_raster), yres(ref_raster)),
+    crs = crs(ref_raster)
+  )
+  
+  # 拓展并填补缺值
+  ref_raster <- extend(ref_raster, tpl)
+  ref_raster <- focal(
+    ref_raster, w = matrix(1, 3, 3),
+    fun = function(x, ...) { c <- x[5]; if (is.na(c)) c <- median(x, na.rm = TRUE); c },
+    pad = TRUE, NAonly = TRUE
+  )
+  
+  ## ---- 3  对齐函数 ----------------------------------------------------------
+  align_to_tpl <- function(path, method = "bilinear") {
+    r <- raster(path)
+    if (!compareCRS(r, ref_raster))
+      r <- projectRaster(r, crs = crs(ref_raster))
+    resample(r, ref_raster, method = method)
+  }
+  
+  ## ---- 4  重采样 ------------------------------------------------------------
+  pres_rs <- lapply(pres_bioclim, align_to_tpl)
+  fut_rs  <- lapply(fut_bioclim , align_to_tpl)
+  topo_rs <- lapply(topography , align_to_tpl)
+  riv_rs  <- lapply(rivers     , align_to_tpl)
+  
+  present_stack <- stack(c(pres_rs, topo_rs, riv_rs))
+  names(present_stack) <- sub("_2001.2014", "", names(present_stack))
+  future_stack  <- stack(c(fut_rs , topo_rs, riv_rs))
+  names(future_stack)  <- sub("_2015.2060", "", names(future_stack))
+  
+  ## ---- 5  物种 & 数据 -------------------------------------------------------
+  occ_raw <- read.csv(
+    "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Vegetation/NFI_2015.csv")
+  species_vec <- c("Quercus suber", "Quercus rotundifolia",
+                   "Castanea sativa", "Eucalyptus",
+                   "Acacia", "Pinus pinaster", "Pinus pinea")
+  
+  for (sp_name in species_vec) {
+    # ---- 5.1  清洗 ----
+    occ <- occ_raw %>% filter(verbatimScientificName == sp_name) %>%
+      filter(!is.na(decimalLatitude), !is.na(decimalLongitude)) %>%
+      distinct(decimalLatitude, decimalLongitude, .keep_all = TRUE)
+    coordinates(occ) <- ~ decimalLongitude + decimalLatitude
+    proj4string(occ) <- CRS("EPSG:4326")
+    occ <- as( st_transform(st_as_sf(occ), crs(ref_raster)) , "Spatial")
+    occ <- occ[!duplicated(cellFromXY(present_stack[[1]], occ)), ]
+    
+    # ---- 5.2  背景 ----
+    occ_r <- rasterize(occ, present_stack, 1)
+    AOI   <- overlay(present_stack, occ_r,
+                     fun = function(e, o) ifelse(is.na(o), e, NA))
+    set.seed(7)
+    bg <- sampleRandom(AOI, nrow(occ)*2, sp = TRUE, na.rm = TRUE)
+    
+    # ---- 5.3  训练/测试 ----
+    set.seed(7)
+    id <- sample(seq_len(nrow(occ)), 0.7*nrow(occ))
+    occ_tr <- occ[id, ];  occ_te <- occ[-id, ]
+    p_tr <- extract(present_stack, occ_tr)
+    p_te <- extract(present_stack, occ_te)
+    a_bg <- extract(present_stack, bg)
+    pa   <- c(rep(1, nrow(p_tr)), rep(0, nrow(a_bg)))
+    env  <- as.data.frame(rbind(p_tr, a_bg))
+    
+    # ---- 5.4  MaxEnt ----
+    sp_dir <- file.path(ssp_out, sp_name)
+    dir.create(sp_dir, showWarnings = FALSE)
+    mod <- maxent(env, p = pa, path = sp_dir,
+                  args = c("responsecurves", "writebackgroundpredictions"))
+    
+    # 预测与阈值
+    pred_now <- predict(mod, present_stack)
+    writeRaster(pred_now, file.path(sp_dir, paste0("present_PP_", sp_name, ".tif")),
+                overwrite = TRUE, format = "GTIFF")
+    eval_tr <- evaluate(p_tr, a_bg, mod)
+    thr_tss <- threshold(eval_tr, "spec_sens")
+    writeRaster(pred_now >= thr_tss,
+                file.path(sp_dir, paste0("present_TSS_", sp_name, ".tif")),
+                overwrite = TRUE, format = "GTIFF")
+    
+    pred_fu <- predict(mod, future_stack)
+    writeRaster(pred_fu, file.path(sp_dir, paste0("future_PP_", sp_name, ".tif")),
+                overwrite = TRUE, format = "GTIFF")
+    writeRaster(pred_fu >= thr_tss,
+                file.path(sp_dir, paste0("future_TSS_", sp_name, ".tif")),
+                overwrite = TRUE, format = "GTIFF")
+    
+    sink(file.path(sp_dir, "evaluations.txt"))
+    cat("== ", sp_name, " ==\nTRAIN\n"); print(eval_tr)
+    cat("\nTEST\n"); print(evaluate(p_te, a_bg, mod)); sink()
+  }
+}
+
+# 运行示例
+run_maxent(126)
+```
+
+```{r}
+run_maxent(245)
+run_maxent(585)
+```
+
+```{r}
+ref_path0 <- "/Users/yangyang/Documents/WildfireCodeYY/Data/R_output_data/Rasters/Portugal_ref_raster.tif"
+ref_r     <- raster(ref_path0)
+
+# size of one pixel in the template grid
+res(ref_r)                # returns c(xres , yres)
+```
+
+```{r}
+# run_maxent <- function(SSP_scenario) {
+#   suppressPackageStartupMessages({
+#     library(raster)
+#     library(sf)
+#     library(sp)
+#     library(dplyr)
+#     library(dismo)
+#   })
+#   
+#   ## ---- 0  路径 -------------------------------------------------------------
+#   bioclim_root <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Bioclim_avg"
+#   topo_root    <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Topography/Topo_processed"
+#   river_root   <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/rivers/portugal_proximity_river_map"
+#   shp_portugal <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+#   ref_path0    <- "/Users/yangyang/Documents/WildfireCodeYY/Data/R_output_data/Rasters/Portugal_ref_raster.tif"
+#   out_root     <- "/Users/yangyang/Documents/WildfireRebuttal/Data/Final/maxent_outputs"
+#   
+#   dir.create(out_root, recursive = TRUE, showWarnings = FALSE)
+#   ssp_out <- file.path(out_root, paste0("SSP", SSP_scenario))
+#   dir.create(ssp_out, showWarnings = FALSE)
+#   
+#   ## ---- 1  文件列表 ---------------------------------------------------------
+#   patt_r <- "\\.(tif(f)?|asc)$"                     # 仅选栅格
+#   hist_dirs <- list.files(file.path(bioclim_root, "SSP245"), full.names = TRUE)
+#   fut_dirs  <- list.files(file.path(bioclim_root, paste0("SSP", SSP_scenario)),
+#                           full.names = TRUE)
+#   pick_files <- function(folders, pattern) {
+#     unlist(lapply(folders, \(fd) list.files(fd, pattern = pattern, full.names = TRUE)))
+#   }
+#   pres_bioclim <- pick_files(hist_dirs, "2001-2014")
+#   fut_bioclim  <- pick_files(fut_dirs , "2015-2060")
+#   topography   <- list.files(topo_root , pattern = patt_r, full.names = TRUE)
+#   rivers       <- list.files(river_root, pattern = patt_r, full.names = TRUE)
+#   
+#   ## ---- 2  参考栅格 + 模板 ---------------------------------------------------
+#   ref_raster <- raster(ref_path0)
+#   if (!compareCRS(ref_raster, CRS("+init=EPSG:20790")))
+#     ref_raster <- projectRaster(ref_raster, crs = CRS("+init=EPSG:20790"))
+#   
+#   # 葡萄牙边界
+#   portugal <- st_read(shp_portugal, quiet = TRUE)
+#   bbox     <- st_bbox(portugal)
+#   tpl <- raster(
+#     xmn = bbox["xmin"], xmx = bbox["xmax"],
+#     ymn = bbox["ymin"], ymx = bbox["ymax"],
+#     resolution = c(xres(ref_raster), yres(ref_raster)),
+#     crs = crs(ref_raster)
+#   )
+#   
+#   # 扩展并填补 ref
+#   ref_raster <- extend(ref_raster, tpl)
+#   ref_raster <- focal(
+#     ref_raster, w = matrix(1, 3, 3),
+#     fun = function(x, ...) {
+#       c <- x[5]; if (is.na(c)) c <- median(x, na.rm = TRUE); c
+#     },
+#     pad = TRUE, NAonly = TRUE
+#   )
+#   
+#   # 陆地掩模（供后续填补 NA）
+#   land_mask <- rasterize(st_as_sf(st_union(portugal)), ref_raster, 1)
+#   
+#   ## ---- 3  对齐函数（含 NA 修补） -------------------------------------------
+#   align_to_tpl <- function(path, method = "bilinear") {
+#     r <- raster(path)
+#     if (!compareCRS(r, ref_raster))
+#       r <- projectRaster(r, crs = crs(ref_raster))
+#     r <- resample(r, ref_raster, method = method)
+#     
+#     if (any(is.na(r[!is.na(land_mask)]))) {
+#       r <- focal(
+#         r, w = matrix(1, 3, 3),
+#         fun = function(x, ...) {
+#           c <- x[5]; if (is.na(c)) c <- median(x, na.rm = TRUE); c
+#         },
+#         pad = TRUE, NAonly = TRUE
+#       )
+#     }
+#     r
+#   }
+#   
+#   ## ---- 4  重采样 ------------------------------------------------------------
+#   pres_rs <- lapply(pres_bioclim, align_to_tpl)
+#   fut_rs  <- lapply(fut_bioclim , align_to_tpl)
+#   topo_rs <- lapply(topography , align_to_tpl)
+#   riv_rs  <- lapply(rivers     , align_to_tpl)
+#   
+#   present_stack <- stack(c(pres_rs, topo_rs, riv_rs))
+#   names(present_stack) <- sub("_2001.2014", "", names(present_stack))
+#   future_stack  <- stack(c(fut_rs , topo_rs, riv_rs))
+#   names(future_stack)  <- sub("_2015.2060", "", names(future_stack))
+#   
+#   ## ---- 4.1  诊断图：任何一层 predictor ------------------------------------
+#   plot(present_stack[[1]],
+#        main = "First predictor (aligned, gap-filled)")
+#   plot(st_geometry(portugal), add = TRUE, lwd = 1)
+#   
+#   ## ---- 5  物种循环 ----------------------------------------------------------
+#   occ_raw <- read.csv(
+#     "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/Vegetation/NFI_2015.csv")
+#   species_vec <- c("Quercus suber", "Quercus rotundifolia",
+#                    "Castanea sativa", "Eucalyptus",
+#                    "Acacia", "Pinus pinaster", "Pinus pinea")
+#   
+#   for (sp_name in species_vec) {
+#     # ---- 5.1  清洗 ----
+#     occ <- occ_raw %>%
+#       filter(verbatimScientificName == sp_name,
+#              !is.na(decimalLatitude), !is.na(decimalLongitude)) %>%
+#       distinct(decimalLatitude, decimalLongitude, .keep_all = TRUE)
+#     coordinates(occ) <- ~ decimalLongitude + decimalLatitude
+#     proj4string(occ) <- CRS("EPSG:4326")
+#     occ <- as(st_transform(st_as_sf(occ), crs(ref_raster)), "Spatial")
+#     occ <- occ[!duplicated(cellFromXY(present_stack[[1]], occ)), ]
+#     
+#     # ---- 5.2  背景 ----
+#     occ_r <- rasterize(occ, present_stack, 1)
+#     AOI   <- overlay(present_stack, occ_r,
+#                      fun = function(e, o) ifelse(is.na(o), e, NA))
+#     set.seed(7)
+#     bg <- sampleRandom(AOI, nrow(occ)*2, sp = TRUE, na.rm = TRUE)
+#     
+#     # ---- 5.3  训练/测试 ----
+#     set.seed(7)
+#     id <- sample(seq_len(nrow(occ)), 0.7*nrow(occ))
+#     occ_tr <- occ[id, ];  occ_te <- occ[-id, ]
+#     p_tr <- extract(present_stack, occ_tr)
+#     p_te <- extract(present_stack, occ_te)
+#     a_bg <- extract(present_stack, bg)
+#     pa   <- c(rep(1, nrow(p_tr)), rep(0, nrow(a_bg)))
+#     env  <- as.data.frame(rbind(p_tr, a_bg))
+#     
+#     # ---- 5.4  MaxEnt ----
+#     sp_dir <- file.path(ssp_out, sp_name)
+#     dir.create(sp_dir, showWarnings = FALSE)
+#     mod <- maxent(env, p = pa, path = sp_dir,
+#                   args = c("responsecurves", "writebackgroundpredictions"))
+#     
+#     #  present 预测 & 诊断图
+#     pred_now <- predict(mod, present_stack)
+#     writeRaster(pred_now, file.path(sp_dir, paste0("present_PP_", sp_name, ".tif")),
+#                 overwrite = TRUE, format = "GTIFF")
+#     plot(pred_now, main = paste("Present PP –", sp_name))
+#     plot(st_geometry(portugal), add = TRUE, lwd = 1)
+#     
+#     #  阈值
+#     eval_tr <- evaluate(p_tr, a_bg, mod)
+#     thr_tss <- threshold(eval_tr, "spec_sens")
+#     writeRaster(pred_now >= thr_tss,
+#                 file.path(sp_dir, paste0("present_TSS_", sp_name, ".tif")),
+#                 overwrite = TRUE, format = "GTIFF")
+#     
+#     #  future 预测
+#     pred_fu <- predict(mod, future_stack)
+#     writeRaster(pred_fu, file.path(sp_dir, paste0("future_PP_", sp_name, ".tif")),
+#                 overwrite = TRUE, format = "GTIFF")
+#     writeRaster(pred_fu >= thr_tss,
+#                 file.path(sp_dir, paste0("future_TSS_", sp_name, ".tif")),
+#                 overwrite = TRUE, format = "GTIFF")
+#     
+#     #  评估保存
+#     sink(file.path(sp_dir, "evaluations.txt"))
+#     cat("== ", sp_name, " ==\nTRAIN\n"); print(eval_tr)
+#     cat("\nTEST\n"); print(evaluate(p_te, a_bg, mod)); sink()
+#   }
+# }
+# 
+# # 示例：
+# run_maxent(126)
+```
+
+```{r}
+# library(raster)
+# library(sf)
+# library(png)  # For loading PNG images
+# 
+# # Load Portugal boundary
+# portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+# portugal <- st_read(portugal_path)
+# 
+# # Base paths
+# base_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/maxent_outputs"
+# output_dir <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps"  # Output directory
+# if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)  # Create directory if it doesn't exist
+# 
+# species_list <- list.files(file.path(base_path, "SSP245"))  # Get the list of species
+# 
+# # Load the external legend image
+# legend_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps/Difference_Maps_Legend.png"
+# legend_img <- readPNG(legend_path)
+# 
+# # Loop through each species
+# for (species in species_list) {
+#   cat("Processing species:", species, "\n")
+#   
+#   # File paths for SSP245, SSP585, and Present distributions
+#   ssp126_file <- file.path(base_path, "SSP126", species, paste0("future_TSS_", species, ".tif"))
+#   ssp245_file <- file.path(base_path, "SSP245", species, paste0("future_TSS_", species, ".tif"))
+#   ssp585_file <- file.path(base_path, "SSP585", species, paste0("future_TSS_", species, ".tif"))
+#   present_file <- file.path(base_path, "SSP245", species, paste0("present_TSS_", species, ".tif"))
+#   
+#   # Check if the files exist
+#   if (file.exists(ssp126_file) & file.exists(ssp245_file) & file.exists(ssp585_file) & file.exists(present_file)) {
+#     # Load the rasters
+#     tss_126 <- raster(ssp126_file)
+#     tss_245 <- raster(ssp245_file)
+#     tss_585 <- raster(ssp585_file)
+#     present <- raster(present_file)
+#     
+#     # Calculate differences
+#     diff_126_present <- tss_126 - present
+#     diff_245_present <- tss_245 - present
+#     diff_585_present <- tss_585 - present
+# 
+#     # Mask differences to make no-change areas white
+#     diff_126_present[diff_126_present == 0] <- NA
+#     diff_245_present[diff_245_present == 0] <- NA
+#     diff_585_present[diff_585_present == 0] <- NA
+# 
+#     # Adjust PNG output size and resolution
+#     output_file <- file.path(output_dir, paste0("Difference_Maps_", species, ".png"))
+#     png(output_file, width = 3000, height = 1000, res = 300)  # High resolution for clarity
+#     
+#     # Set up the layout for three plots in a row
+#     par(mfrow = c(1, 3), mar = c(2, 2, 2, 2), oma = c(0, 0, 0, 0), bty = "n")
+#     
+#     # Load the legend image
+#     legend_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps/Difference_Maps_Legend.png"
+#     legend_img <- readPNG(legend_path)
+#     
+#     # Function to plot maps with an enlarged external legend
+#     plot_with_large_legend <- function(diff_map, title, colors) {
+#       plot(diff_map,
+#            main = title,
+#            col = colors,
+#            axes = FALSE,
+#            xlab = "", ylab = "",
+#            frame.plot = FALSE,
+#            legend = FALSE)  # Remove default legend
+#       
+#       plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+#       
+#       # Adjust legend position to match the scale (Larger & Clearer)
+#       legend_x_left <- par("usr")[2] - 0.3 * diff(par("usr")[1:2])  # Move further left
+#       legend_x_right <- par("usr")[2]  # Keep closer to right edge
+#       legend_y_bottom <- par("usr")[3] + 0.1 * diff(par("usr")[3:4])  # Move higher
+#       legend_y_top <- par("usr")[3] + 0.4 * diff(par("usr")[3:4])  # Increase height
+#     
+#       # Overlay larger legend
+#       rasterImage(legend_img, 
+#                   xleft = legend_x_left, 
+#                   ybottom = legend_y_bottom, 
+#                   xright = legend_x_right, 
+#                   ytop = legend_y_top)
+#     }
+#     
+#     # Plot 1: SSP126 vs Present
+#     plot_with_large_legend(diff_126_present, paste("SSP126 vs Present:", species), colors_126_present)
+#     
+#     # Plot 2: SSP245 vs Present
+#     plot_with_large_legend(diff_245_present, paste("SSP245 vs Present:", species), colors_245_present)
+#     
+#     # Plot 3: SSP585 vs Present
+#     plot_with_large_legend(diff_585_present, paste("SSP585 vs Present:", species), colors_585_present)
+#     
+#     dev.off()  # Save the PNG
+#   } else {
+#     cat("Files for species", species, "are missing. Skipping.\n")
+#   }
+# }
+```
+
+```{r}
+# 
+# library(raster)
+# library(sf)
+# 
+# # Load Portugal boundary
+# portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+# portugal <- st_read(portugal_path)
+# 
+# # Base paths
+# base_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/maxent_outputs"
+# output_dir <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps"  
+# if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+# 
+# species_list <- list.files(file.path(base_path, "SSP245"))
+# # If there are more than 7 species and you wish to select only 7, you can subset:
+# selected_species <- species_list[1:7]
+# 
+# # Define your color schemes for each scenario (assuming these are defined elsewhere)
+# # For example:
+# # colors_126_present <- colorRampPalette(c("blue", "white", "red"))(100)
+# # colors_245_present <- colorRampPalette(c("blue", "white", "red"))(100)
+# # colors_585_present <- colorRampPalette(c("blue", "white", "red"))(100)
+# 
+# # Set output file for the big image
+# big_output_file <- file.path(output_dir, "Big_Difference_Map.png")
+# # Adjust width and height as needed; here, width is set to 3000 and height to 7000 to accommodate 7 rows.
+# png(big_output_file, width = 3000, height = 7000, res = 300)
+# 
+# # Set up a 7 (species) x 3 (SSP) grid
+# par(mfrow = c(7, 3), mar = c(2, 2, 2, 2))
+# 
+# for (species in selected_species) {
+#   cat("Processing species:", species, "\n")
+#   
+#   # Define file paths for each scenario and the present distribution
+#   ssp126_file <- file.path(base_path, "SSP126", species, paste0("future_TSS_", species, ".tif"))
+#   ssp245_file <- file.path(base_path, "SSP245", species, paste0("future_TSS_", species, ".tif"))
+#   ssp585_file <- file.path(base_path, "SSP585", species, paste0("future_TSS_", species, ".tif"))
+#   present_file <- file.path(base_path, "SSP245", species, paste0("present_TSS_", species, ".tif"))
+#   
+#   # Check if all required files exist for the current species
+#   if (file.exists(ssp126_file) & file.exists(ssp245_file) & file.exists(ssp585_file) & file.exists(present_file)) {
+#     # Load rasters
+#     tss_126 <- raster(ssp126_file)
+#     tss_245 <- raster(ssp245_file)
+#     tss_585 <- raster(ssp585_file)
+#     present <- raster(present_file)
+#     
+#     # Calculate the differences (future - present)
+#     diff_126 <- tss_126 - present
+#     diff_245 <- tss_245 - present
+#     diff_585 <- tss_585 - present
+# 
+#     # Mask out no-change areas (set zero differences to NA)
+#     diff_126[diff_126 == 0] <- NA
+#     diff_245[diff_245 == 0] <- NA
+#     diff_585[diff_585 == 0] <- NA
+# 
+#     # Plot the SSP126 difference map without legend
+#     plot(diff_126,
+#          main = paste("SSP126 vs Present:", species),
+#          col = colors_126_present,
+#          axes = FALSE,
+#          xlab = "",
+#          ylab = "",
+#          frame.plot = FALSE,
+#          legend = FALSE)
+#     plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+# 
+#     # Plot the SSP245 difference map without legend
+#     plot(diff_245,
+#          main = paste("SSP245 vs Present:", species),
+#          col = colors_245_present,
+#          axes = FALSE,
+#          xlab = "",
+#          ylab = "",
+#          frame.plot = FALSE,
+#          legend = FALSE)
+#     plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+# 
+#     # Plot the SSP585 difference map without legend
+#     plot(diff_585,
+#          main = paste("SSP585 vs Present:", species),
+#          col = colors_585_present,
+#          axes = FALSE,
+#          xlab = "",
+#          ylab = "",
+#          frame.plot = FALSE,
+#          legend = FALSE)
+#     plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+#     
+#   } else {
+#     cat("Files for species", species, "are missing. Skipping.\n")
+#     # Optionally, add blank plots if you want the grid to remain consistent
+#     for(i in 1:3) plot.new()
+#   }
+# }
+# 
+# dev.off()
+```
+
+```{r}
+# library(raster)
+# library(sf)
+# 
+# # 1) Load Portugal boundary
+# portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+# portugal <- st_read(portugal_path)
+# 
+# # 2) Base paths
+# base_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/maxent_outputs"
+# output_dir <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps"
+# if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+# 
+# # 3) Species list and selection
+# species_list <- list.files(file.path(base_path, "SSP245"))
+# selected_species <- species_list[1:7]
+# 
+# # 4) Define color schemes for each difference map:
+# #    We create a gradient from "Present More" (orange) to "Future More" (e.g. aquamarine2).
+# #    The zero-difference areas will be turned to NA and rendered white (see step 7).
+# colors_126_present <- colorRampPalette(c("orange", "aquamarine2"))(100)
+# colors_245_present <- colorRampPalette(c("orange", "lightslateblue"))(100)
+# colors_585_present <- colorRampPalette(c("orange", "lightcoral"))(100)
+# 
+# # 5) Create output file
+# big_output_file <- file.path(output_dir, "Big_Difference_Map_with_Custom_Colors.png")
+# png(big_output_file, width = 3000, height = 7000, res = 300)
+# 
+# # 6) Create a 7×3 grid and reserve extra space on the right for the legend
+# #    mar = c(2,2,2,2) are the inner margins for each subplot
+# #    oma = c(0,0,0,6) leaves 6 lines of space on the right side for the legend
+# par(mfrow = c(7, 3), mar = c(2, 2, 2, 2), oma = c(0, 0, 0, 6))
+# 
+# # 7) Loop over species and plot difference maps
+# for (species in selected_species) {
+#   cat("Processing species:", species, "\n")
+#   
+#   # Build file paths
+#   ssp126_file <- file.path(base_path, "SSP126", species, paste0("future_TSS_", species, ".tif"))
+#   ssp245_file <- file.path(base_path, "SSP245", species, paste0("future_TSS_", species, ".tif"))
+#   ssp585_file <- file.path(base_path, "SSP585", species, paste0("future_TSS_", species, ".tif"))
+#   present_file <- file.path(base_path, "SSP245", species, paste0("present_TSS_", species, ".tif"))
+#   
+#   # Check existence of required files
+#   if (file.exists(ssp126_file) && file.exists(ssp245_file) &&
+#       file.exists(ssp585_file) && file.exists(present_file)) {
+#     
+#     # Read rasters
+#     tss_126 <- raster(ssp126_file)
+#     tss_245 <- raster(ssp245_file)
+#     tss_585 <- raster(ssp585_file)
+#     present <- raster(present_file)
+#     
+#     # Compute future - present differences
+#     diff_126 <- tss_126 - present
+#     diff_245 <- tss_245 - present
+#     diff_585 <- tss_585 - present
+#     
+#     # Mask out no-change areas
+#     diff_126[diff_126 == 0] <- NA
+#     diff_245[diff_245 == 0] <- NA
+#     diff_585[diff_585 == 0] <- NA
+#     
+#     # --- Plot for SSP126 ---
+#     plot(diff_126,
+#          main = paste("SSP126 vs Present:", species),
+#          col = colors_126_present,
+#          axes = FALSE, xlab = "", ylab = "",
+#          frame.plot = FALSE, legend = FALSE)
+#     plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+#     
+#     # --- Plot for SSP245 ---
+#     plot(diff_245,
+#          main = paste("SSP245 vs Present:", species),
+#          col = colors_245_present,
+#          axes = FALSE, xlab = "", ylab = "",
+#          frame.plot = FALSE, legend = FALSE)
+#     plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+#     
+#     # --- Plot for SSP585 ---
+#     plot(diff_585,
+#          main = paste("SSP585 vs Present:", species),
+#          col = colors_585_present,
+#          axes = FALSE, xlab = "", ylab = "",
+#          frame.plot = FALSE, legend = FALSE)
+#     plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 1.5)
+#     
+#   } else {
+#     cat("Files for species", species, "are missing. Skipping.\n")
+#     # Keep the grid structure if missing
+#     for (i in 1:3) plot.new()
+#   }
+# }
+# 
+# # 8) Add a single legend in the right outer margin
+# #    We enable drawing outside the plot region (xpd=NA)
+# #    and place the legend in the middle of the right margin using legend("right").
+# par(xpd = NA)
+# legend("right",
+#        inset = c(0, 0),  # Adjust if you want to nudge it up/down
+#        legend = c("SSP126 More",
+#                   "SSP245 More",
+#                   "SSP585 More",
+#                   "Present More",
+#                   "No Change"),
+#        fill = c("aquamarine2", "lightslateblue", "lightcoral", "orange", "white"),
+#        cex = 0.9,
+#        bty = "n")
+# 
+# dev.off()
+```
+
+```{r}
+# portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+# portugal <- st_read(portugal_path)
+# 
+# # 2) Base paths
+# base_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/maxent_outputs"
+# output_dir <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps"
+# if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+# 
+# # 3) Species list (7 species in correct order)
+# selected_species <- c("Acacia", "Castanea sativa", "Eucalyptus", 
+#                       "Pinus pinaster", "Pinus pinea", "Quercus rotundifolia", "Quercus suber")
+# 
+# # 4) Correct Row Order for Scenarios
+# scenarios <- c("Historical", "SSP126", "SSP245", "SSP585")  # Now Historical is first
+# 
+# # 5) Define output file with **larger width and height** for better readability
+# output_file <- file.path(output_dir, "Table_Difference_Map_WithBlankColumn.png")
+# png(output_file, width = 2400, height = 1400, res = 300)
+# 
+# # 6) Layout: 3 rows (scenarios) × 8 columns (7 for species maps + 1 blank for legend)
+# layout_mat <- matrix(
+#   c( 1:8,    # Row 1 (Historical)
+#      9:16,   # Row 2 (SSP126)
+#      17:24,  # Row 3 (SSP245)
+#      25:32   # Row 4 (SSP585)
+#   ),
+#   nrow = 4, byrow = TRUE
+# )
+# 
+# layout(layout_mat, widths = c(rep(1, 7), 0.8), heights = rep(1, 4))
+# 
+# # 7) Increase margins so maps are larger but labels fit
+# par(mfrow = c(4, 8), mar = c(1, 1, 1, 1), oma = c(5, 5, 2, 2))  
+# 
+# # 8) Loop through scenarios & species
+# row_index <- 0
+# for (scenario in scenarios) {
+#   row_index <- row_index + 1
+#   
+#   # For each scenario row, we have 7 species columns, then 1 blank/legend column
+#   col_index <- 0
+#   for (species in selected_species) {
+#     col_index <- col_index + 1
+#     
+#     scenario_file <- file.path(base_path, scenario, species, paste0("future_TSS_", species, ".tif"))
+#     present_file  <- file.path(base_path, "SSP245", species, paste0("present_TSS_", species, ".tif"))
+#     
+#     if (file.exists(scenario_file) && file.exists(present_file)) {
+#       future_raster <- raster(scenario_file)
+#       present_raster <- raster(present_file)
+#       diff_raster <- future_raster - present_raster
+#       
+#       # Mask no-change areas
+#       diff_raster[diff_raster == 0] <- NA
+#       
+#       plot(diff_raster,
+#            col = colors_list[[scenario]],
+#            axes = FALSE, xlab = "", ylab = "",
+#            main = "", legend = FALSE, box = FALSE)
+#       plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 0.6)
+#       
+#     } else {
+#       plot.new()  # blank if missing
+#     }
+#   }
+#   
+#   # 8th column in this row: either draw legend (once) or leave blank
+#   col_index <- col_index + 1
+#   # Let's only draw the legend in the top row (row_index == 1)
+#   if (row_index == 1) {
+#     plot.new()
+#     legend("center",
+#            legend = c("SSP126", "SSP245", "SSP585",
+#                       "Historical", "No Change"),
+#            fill = c("aquamarine2", "lightslateblue", "lightcoral", "orange", "white"),
+#            cex = 0.6,
+#            bty = "n")
+#   } else {
+#     # For the second and third rows, we just leave it blank
+#     plot.new()
+#   }
+# }
+# 
+# # 8) Add outer margin labels for columns/rows
+# mtext("Tree Species", side = 1, line = 2, outer = TRUE, cex = 1)
+# mtext("SSP Scenario", side = 2, line = 2, outer = TRUE, cex = 1)
+# 
+# # Column labels (species) across the bottom
+# # 7 species over the first 7 columns. 
+# # Because now we have 8 columns in total, the positions shift slightly.
+# x_positions <- seq(1/16, 13/16, length.out = 7)
+# mtext(selected_species, side = 1, at = x_positions, line = 0, outer = TRUE, cex = 0.6)
+# 
+# # Row labels (scenarios) along the left
+# y_positions <- c(5/6, 3/6, 1/6)  # top, middle, bottom
+# mtext(scenarios, side = 2, at = y_positions, line = 0, outer = TRUE, cex = 0.6)
+# 
+# dev.off()
+```
+
+```{r}
+# portugal_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Initial/boundaries/portugal_20790/portugal_20790.shp"
+# portugal <- st_read(portugal_path)
+# 
+# # 2) Define paths
+# base_path <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/maxent_outputs"
+# output_dir <- "/Users/yangyang/Documents/WildfireCodeYY/Data/Final/MaxentPlots/Difference_Maps"
+# if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+# 
+# # 3) Species list (7 species in correct order)
+# selected_species <- c("Acacia", "Castanea sativa", "Eucalyptus", 
+#                       "Pinus pinaster", "Pinus pinea", "Quercus rotundifolia", "Quercus suber")
+# 
+# # 4) Correct Row Order for Scenarios
+# scenarios <- c("Historical", "SSP126", "SSP245", "SSP585")  # Now Historical is first
+# 
+# # 5) Define output file with **larger width and height** for better readability
+# output_file <- file.path(output_dir, "Table_TSS_Scenario_4x8_Larger.png")
+# png(output_file, width = 3200, height = 1800, res = 400)  # **Increased width & height**
+# 
+# # 6) Define a layout: 4 rows (scenarios) × 8 columns (7 species + 1 legend)
+# layout_mat <- matrix(
+#   c( 1:8,    # Row 1 (Historical)
+#      9:16,   # Row 2 (SSP126)
+#      17:24,  # Row 3 (SSP245)
+#      25:32   # Row 4 (SSP585)
+#   ),
+#   nrow = 4, byrow = TRUE
+# )
+# 
+# layout(layout_mat, widths = c(rep(1, 7), 0.8), heights = rep(1, 4))
+# 
+# # 7) Increase margins so maps are larger but labels fit
+# par(mfrow = c(4, 8), mar = c(1, 1, 1, 1), oma = c(5, 5, 2, 2))  
+# 
+# # 8) Loop through scenarios & species
+# row_index <- 0
+# for (scenario in scenarios) {
+#   row_index <- row_index + 1
+#   
+#   for (species in selected_species) {
+#     if (scenario == "Historical") {
+#       species_file <- file.path(base_path, "SSP245", species, paste0("present_PP_", species, ".tif"))
+#     } else {
+#       species_file <- file.path(base_path, scenario, species, paste0("future_PP_", species, ".tif"))
+#     }
+# 
+#     if (file.exists(species_file)) {
+#       raster_data <- raster(species_file)
+#       
+#       plot(raster_data, col = rev(terrain.colors(100)), axes = FALSE, xlab = "", ylab = "", 
+#            main = "", legend = FALSE, box = FALSE)
+#       plot(st_geometry(portugal), add = TRUE, border = "gray25", lwd = 0.6)
+#       
+#     } else {
+#       plot.new()  # Blank if missing
+#     }
+#   }
+#   
+#   # 8th column: Legend only in the top row
+#   if (row_index == 1) {
+#     plot.new()
+#     legend_breaks <- seq(0, 1, length.out = 100)
+#   } else {
+#     plot.new()  # Blank for other rows
+#   }
+# }
+# 
+# # 8) Add outer margin labels for columns/rows
+# mtext("Tree Species", side = 1, line = 2, outer = TRUE, cex = 1)
+# mtext("SSP Scenario", side = 2, line = 2, outer = TRUE, cex = 1)
+# 
+# # Rotate labels and adjust position
+# x_positions <- seq(1/16, 13/16, length.out = 7)
+# mtext(selected_species, side = 1, at = x_positions, line = 0, outer = TRUE, cex = 0.6)
+# 
+# # 10) Fix **Scenario Labels (Y-axis)**
+# y_positions <- c(0.88, 0.63, 0.38, 0.13)  # Matches Historical → SSP126 → SSP245 → SSP585
+# mtext(scenarios, side = 2, at = y_positions, line = 0, outer = TRUE, cex = 0.6)
+# 
+# dev.off()  # **Finish saving the image**
+```
+
+```{r}
+
+
+```
