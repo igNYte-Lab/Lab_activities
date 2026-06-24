@@ -7,7 +7,7 @@ Created on Jan 15 2022
 
 Last updated on Jun 24 2026
 
-@author: Augustin Guibaud
+@author: Augustin Guibaud, cleaned with Claude
 """
 
 import tkinter as tk
