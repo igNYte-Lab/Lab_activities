@@ -1,0 +1,25 @@
+# Streamlit settings for the Spacecraft Material Flammability Database.
+# Light and dark themes are both defined; the app follows the visitor's device.
+
+[theme]
+font = "sans-serif"
+baseRadius = "medium"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#57068c"            # NYU violet
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f3f8"
+textColor = "#1d1b20"
+
+[theme.dark]
+primaryColor = "#a97fe8"            # lighter violet, readable on dark
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a1c24"
+textColor = "#f2f1f5"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
