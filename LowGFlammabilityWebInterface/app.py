@@ -567,7 +567,7 @@ with tab_map:
 
     hidden = len(frame) - len(plot)
     st.caption(
-        "**Filled circles**: the flame propagated · **open circles**: the flame went out. "
+        "**Filled circles**: the flame propagated for the duration of the experiment · **open circles**: the sample did not ignite, or the flame went out before the end of the experiment.\n "
         "Drag to zoom, double-click to reset, click a legend entry to hide it."
         + (f" {hidden:,} tests in this selection have no value for one of the axes or no "
            "reported outcome, so they are not plotted." if hidden else "")
@@ -688,7 +688,8 @@ with tab_about:
             f"flow velocity) at a given gravity level. It records whether the flame propagated or "
             f"went out and, when measured, how fast it spread.\n\n"
             f"Data were extracted from {studies.shape[0]} papers and technical reports by the "
-            f"[{LAB_NAME}]({LAB_URL}) at NYU Tandon. Version: {DATA_VERSION}."
+            f"[{LAB_NAME}]({LAB_URL}) at NYU Tandon. Version: {DATA_VERSION}. \n"
+            f"The initial website was developed by Jaskaran Singh Hanspal in 2026."
         )
         st.subheader("How to use it", anchor=False)
         st.markdown(
@@ -704,8 +705,8 @@ with tab_about:
         st.code(CITE_AS, language=None, wrap_lines=True)
         st.markdown("Please also cite the original studies listed in the **Sources** tab.")
         st.subheader("Corrections", anchor=False)
-        st.markdown(f"Spotted an error or want a study added? Get in touch through the "
-                    f"[{LAB_NAME} website]({LAB_URL}).")
+        st.markdown(f"Spotted an error or want a study added? Get in touch with "
+                    f"[Dr. Augustin Guibaud](mailto:acg10084@nyu.edu).")
     with right:
         st.subheader("Glossary", anchor=False)
         st.markdown(
