@@ -567,7 +567,7 @@ with tab_map:
 
     hidden = len(frame) - len(plot)
     st.caption(
-        "**Filled circles**: the flame propagated for the duration of the experiment · **open circles**: the sample did not ignite, or the flame went out before the end of the experiment.\n "
+        "**Filled circles**: the flame propagated for the duration of the experiment · **open circles**: the sample did not ignite, or the flame went out before the end of the experiment. \n \n "
         "Drag to zoom, double-click to reset, click a legend entry to hide it."
         + (f" {hidden:,} tests in this selection have no value for one of the axes or no "
            "reported outcome, so they are not plotted." if hidden else "")
